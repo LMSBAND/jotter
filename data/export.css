@@ -1,0 +1,37 @@
+:root { --text: #1f2328; --muted: #6b7280; --rule: #dcdfe4; --code-bg: #f5f6f8; --link: #1a5fb4; }
+html { font-size: 11pt; }
+body { margin: 0; color: var(--text); background: #fff; line-height: 1.45;
+       font-family: "Inter", "Noto Sans", "Helvetica Neue", Arial, sans-serif; }
+article { max-width: 46em; margin: 3em auto; padding: 0 1.5em; }
+article > :first-child { margin-top: 0; }
+h1, h2, h3, h4, h5, h6 { line-height: 1.2; margin: 1.4em 0 0.5em; break-after: avoid; }
+h1 { font-size: 2em; } h2 { font-size: 1.5em; } h3 { font-size: 1.25em; } h4 { font-size: 1.1em; }
+h5, h6 { font-size: 1em; }
+p { margin: 0 0 0.8em; }
+a { color: var(--link); }
+code, pre { font-family: "Hack", "DejaVu Sans Mono", "Liberation Mono", monospace; font-size: 0.9em; }
+:not(pre) > code { background: #eef0f2; padding: 0.1em 0.3em; border-radius: 3px; }
+pre { margin: 0 0 0.8em; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.3; }
+pre.code { background: var(--code-bg); border: 1px solid var(--rule); border-radius: 6px; padding: 0.6em 0.9em; }
+pre.code + pre.output, pre.code + p.figure { margin-top: -0.4em; }
+pre.output { color: var(--muted); border-left: 3px solid var(--rule); padding-left: 0.8em; }
+pre.error { color: #c5221f; border-left-color: #c5221f; }
+p.figure { text-align: center; break-inside: avoid; }
+p.math { text-align: center; margin: 1em 0; break-inside: avoid; }
+img { max-width: 100%; height: auto; }
+img.math { max-width: none; }
+blockquote { margin: 0 0 0.8em; padding-left: 1em; border-left: 3px solid var(--rule); color: var(--muted); }
+blockquote p:last-child { margin-bottom: 0; }
+ul, ol { margin: 0 0 0.8em; padding-left: 1.7em; }
+li { margin: 0.15em 0; }
+li > ul, li > ol { margin-bottom: 0; }
+li.task { list-style: none; margin-left: -1.5em; }
+li.task input { margin: 0 0.4em 0 0; }
+table { border-collapse: collapse; width: 100%; margin: 0 0 0.8em; }
+th, td { border: 1px solid #b9bec6; padding: 0.3em 0.5em; text-align: left; vertical-align: top; }
+tr { break-inside: avoid; }
+hr { border: 0; border-top: 1.5px solid var(--rule); margin: 1.2em 0; }
+@media print {
+  article { max-width: none; margin: 0; padding: 0; }
+  pre.code { break-inside: avoid; }
+}

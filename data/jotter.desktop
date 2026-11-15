@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Jotter
+GenericName=Word Processor
+Comment=Write documents with runnable code, plots and math
+Exec=jotter %f
+Icon=jotter
+Terminal=false
+Categories=Office;WordProcessor;
+MimeType=text/markdown;text/x-markdown;
+StartupWMClass=jotter
