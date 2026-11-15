@@ -12,10 +12,15 @@
 #include "render.h"
 
 #include <QApplication>
+#include <QAbstractTextDocumentLayout>
 #include <QElapsedTimer>
 #include <QDialog>
 #include <QDir>
+#include <QSettings>
+#include <QStandardPaths>
 #include <QFile>
+#include <QFontInfo>
+#include <QFontDatabase>
 #include <QInputDialog>
 #include <QLineEdit>
 #include <QMenu>
@@ -23,11 +28,13 @@
 #include <QPainter>
 #include <QPlainTextEdit>
 #include <QClipboard>
+#include <QComboBox>
 #include <QScrollBar>
 #include <QTemporaryDir>
 #include <QTest>
 #include <QTimer>
 #include <QTextDocument>
+#include <QTextLayout>
 #include <cstdio>
 #include <functional>
 #include <random>
@@ -478,15 +485,22 @@ static void test_kernel()
     auto text = [&](int i, int item = 0) { return results.value(i).items.value(item).text; };
     auto type = [&](int i, int item = 0) { return int(results.value(i).items.value(item).type); };
 
-    CHECK(Kernel::canRun("python") && Kernel::canRun("bash") && !Kernel::canRun("yaml"));
+#ifdef Q_OS_WIN
+    const QString shell = "batch", hello = "@echo off\necho hi\necho err 1>&2\ncd", fail = "@exit 3";
+    const QString here = QDir::toNativeSeparators(tmp.path());
+#else
+    const QString shell = "bash", hello = "echo hi; echo err 1>&2; pwd", fail = "exit 3";
+    const QString here = tmp.path();
+#endif
+    CHECK(Kernel::canRun("python") && Kernel::canRun(shell) && !Kernel::canRun("yaml"));
 
     run("python", "x = 6\nprint('a')\nx * 7");
     run("python", "x += 1\nx");                 // shared namespace, queued behind the first
     run("python", "import matplotlib.pyplot as plt\nplt.plot([1, 2, 3])");
     run("python", "1/0");
-    run("bash", "echo hi; echo err 1>&2; pwd");
+    run(shell, hello);
     run("dot", "digraph { a -> b }");
-    run("bash", "exit 3");
+    run(shell, fail);
     if (!wait(7)) {
         CHECK(!"kernel timed out");
         return;
@@ -498,7 +512,7 @@ static void test_kernel()
     CHECK(QFile::exists(tmp.path() + "/" + text(2)));
     CHECK(!results[3].ok && type(3) == Kernel::Item::Error);
     CHECK(text(3).contains("ZeroDivisionError") && text(3).contains("<cell 4>"));
-    CHECK(results[4].ok && text(4).contains("hi") && text(4).contains("err") && text(4).contains(tmp.path()));
+    CHECK(results[4].ok && text(4).contains("hi") && text(4).contains("err") && text(4).contains(here, Qt::CaseInsensitive));
     if (Kernel::canRun("dot"))
         CHECK(results[5].ok && type(5) == Kernel::Item::Image && QFile::exists(tmp.path() + "/" + text(5)));
     CHECK(!results[6].ok);
@@ -518,6 +532,25 @@ static void test_kernel()
     run("python", "x");
     CHECK(wait(10));
     CHECK(!results.value(9).ok && text(9).contains("NameError"));
+
+    // a !shell line: what the command printed and nothing more; a slow one can be stopped
+    const int base = results.size();
+    run("python", "!echo out");
+#ifdef Q_OS_WIN
+    run("python", "y = 5\n!python -c \"import time; time.sleep(60)\"");
+#else
+    run("python", "y = 5\n!sleep 60");
+#endif
+    QElapsedTimer stopwatch;
+    stopwatch.start();
+    QTimer::singleShot(2500, &k, [&] { k.interrupt(); });
+    CHECK(wait(base + 2));
+    run("python", "y");
+    CHECK(wait(base + 3));
+    CHECK_EQ(text(base), QString("out\n"));
+    CHECK(!results.value(base + 1).ok && stopwatch.elapsed() < 20000);
+    CHECK_EQ(text(base + 2), QString("5\n"));
+    results.remove(base, results.size() - base);
 
     // unicode, and a kernel that dies mid-cell
     run("python", QString::fromUtf8("print('h\xC3\xA9llo \xE2\x9C\x93')"));
@@ -560,7 +593,8 @@ struct Typist {
     QString md() const { return ed.toMarkdown(); }
     bool tidy() const   // spacing agrees with structure everywhere
     {
-        return !needsNormalize(ed.document(), ed.document()->firstBlock(), ed.document()->lastBlock(), ed.theme.layoutEm());
+        return !needsNormalize(ed.document(), ed.document()->firstBlock(), ed.document()->lastBlock(), ed.theme.layoutEm(),
+                               ed.theme.leading);
     }
     bool settle(int msecs = 60000)      // wait for running cells
     {
@@ -762,6 +796,7 @@ static void test_editor_files()
         QFile f(path);
         CHECK(f.open(QIODevice::ReadOnly));
         const QString saved = QString::fromUtf8(f.readAll());
+        f.close();          // (Windows will not replace a file that is open)
         CHECK(saved.contains("![output](notes.assets/" + first.value(0) + ")"));
 
         // run it again with a different picture: after saving and closing, the old one is gone
@@ -885,6 +920,212 @@ static void test_spelling()
     CHECK(!r->wordAt(t.ed.document()->firstBlock(), 7, &start, &end, &word));
 }
 
+// A PDF comes out of whatever prints pages on this machine: Jotter's own helper,
+// or a browser run without a window.
+static void test_pdf()
+{
+    Typist t;
+    t.ed.loadMarkdown("# Title\n\nSome text.\n\n```python\nprint(1)\n```\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n\n"
+                      "<!--font: EB Garamond-->\n");
+    QTemporaryDir dir;
+    for (const bool browser : {false, true}) {
+        if (!canExportPdf(browser)) {
+            std::printf("  (no %s on this machine: skipped)\n", browser ? "browser that prints" : "PDF printer");
+            continue;
+        }
+        const QString path = dir.path() + (browser ? "/browser.pdf" : "/any.pdf");
+        int result = -1;
+        exportPdf(t.ed.document(), t.ed.store(), "Title", path, "a4", &t.ed, [&](bool ok) { result = ok; }, browser);
+        QElapsedTimer timer;
+        timer.start();
+        while (result < 0 && timer.elapsed() < 90000)
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
+        CHECK_EQ(result, 1);
+        QFile f(path);
+        CHECK(f.open(QIODevice::ReadOnly));
+        const QByteArray pdf = f.readAll();
+        CHECK(pdf.startsWith("%PDF-") && pdf.contains("EBGaramond"));       // in the document's own face
+    }
+}
+
+// The text face: fonts that are part of Jotter, chosen per document and kept in it.
+static void test_fonts()
+{
+    for (const Face &face : faces()) {
+        if (!face.builtIn())
+            continue;
+        Theme th;
+        th.setFace(face);
+        CHECK_EQ(th.body, face.family);
+        CHECK(QFontInfo(th.bodyFont()).family().startsWith(face.family));       // (the system may have the family too)
+        CHECK(QFontDatabase().styles(face.family).size() >= face.files.size());     // real bold and italic, not faked ones
+        CHECK(th.leading > 0.6 && th.leading < 1.2);
+    }
+    CHECK(!faceNamed("Papyrus").builtIn() && !faceNamed("").builtIn() && !faceNamed("Default").builtIn());
+    CHECK_EQ(faceNamed(" eb garamond ").name, QString("EB Garamond"));
+
+    // choosing one is an edit: it shows, it is saved in the document, it can be undone
+    Typist t;
+    int changes = 0;
+    QObject::connect(&t.ed, &Editor::faceChanged, [&] { ++changes; });
+    t.type("Title\nSome text");
+    const QString plain = "Title\n\nSome text\n";
+    CHECK_EQ(t.md(), plain);
+    t.ed.setFace("EB Garamond");
+    CHECK_EQ(t.ed.face(), QString("EB Garamond"));
+    CHECK_EQ(t.ed.document()->defaultFont().family(), QString("EB Garamond"));
+    CHECK_EQ(t.md(), plain + "\n<!--font: EB Garamond-->\n");
+    CHECK(t.tidy() && t.ed.document()->isModified());
+    t.ed.undoStep();
+    CHECK_EQ(t.ed.face(), QString("Default"));
+    CHECK_EQ(t.md(), plain);
+    CHECK(t.tidy());
+    t.ed.redoStep();
+    CHECK_EQ(t.ed.face(), QString("EB Garamond"));
+    CHECK_EQ(t.md(), plain + "\n<!--font: EB Garamond-->\n");
+    CHECK(t.tidy());
+    CHECK_EQ(changes, 3);
+    t.key(Qt::Key_Return);
+    t.type("typed in it");
+    CHECK(t.tidy());
+    t.ed.setFace("Default");
+    CHECK_EQ(t.md(), plain + "\ntyped in it\n");
+    CHECK(t.tidy());
+
+    // whatever the face, its lines are as far apart
+    t.ed.loadMarkdown(QString("words ").repeated(80).trimmed() + "\n");
+    QVector<qreal> pitches;
+    for (const Face &face : faces()) {
+        if (!face.builtIn())
+            continue;
+        t.ed.setFace(face.name);
+        QApplication::processEvents();
+        const QTextLayout *lines = t.ed.document()->firstBlock().layout();
+        CHECK(lines->lineCount() > 1);
+        if (lines->lineCount() > 1)
+            pitches << lines->lineAt(1).y() - lines->lineAt(0).y();
+        CHECK(t.tidy());
+    }
+    for (const qreal pitch : pitches)
+        CHECK(qAbs(pitch - pitches.first()) < 1.0);
+
+    // a document says which face it is in; one that does not is in the default
+    const QString comic = "# T\n\ntext\n\n<!--font: Comic Relief-->\n";
+    t.ed.loadMarkdown(comic);
+    CHECK_EQ(t.ed.face(), QString("Comic Relief"));
+    CHECK_EQ(t.md(), comic);
+    CHECK(t.tidy() && !t.ed.document()->isModified() && !t.ed.document()->isUndoAvailable());
+    t.ed.loadMarkdown("plain\n");
+    CHECK_EQ(t.ed.face(), QString("Default"));
+    CHECK_EQ(t.md(), QString("plain\n"));
+    t.ed.loadMarkdown("text\n\n<!-- font:  roboto -->\n");       // written by hand
+    CHECK_EQ(t.ed.face(), QString("Roboto"));
+    CHECK_EQ(t.md(), QString("text\n\n<!--font: Roboto-->\n"));
+    for (const QString &ending : {QString("- one\n- two"), QString("```python\nprint(1)\n```"), QString("<!--cell python\nprint(1)\n-->"),
+                                  QString("> quoted"), QString("| a | b |\n| --- | --- |\n| 1 | 2 |"), QString("$$\nx^2\n$$")}) {
+        const QString all = "start\n\n" + ending + "\n\n<!--font: Source Serif-->\n";     // whatever the document ends in
+        t.ed.loadMarkdown(all);
+        CHECK_EQ(t.ed.face(), QString("Source Serif"));
+        CHECK_EQ(t.md(), all);
+        CHECK(t.tidy());
+    }
+    for (const QString &other : {QString("```\n<!--font: Roboto-->\n```\n"),         // in a code block it is code
+                                 QString("text\n\n<!--font: Papyrus-->\n")}) {       // a face Jotter does not have is left alone
+        t.ed.loadMarkdown(other);
+        CHECK_EQ(t.ed.face(), QString("Default"));
+        CHECK_EQ(t.md(), other);
+    }
+
+    // another document's content comes in without its face
+    QTemporaryDir dir;
+    {
+        QFile other(dir.path() + "/other.md");
+        CHECK(other.open(QIODevice::WriteOnly));
+        other.write("theirs\n\n<!--font: Comic Relief-->\n");
+        other.close();
+        t.ed.loadMarkdown("mine\n\n<!--font: Roboto-->\n");
+        QTextCursor end(t.ed.document());
+        end.movePosition(QTextCursor::End);
+        t.ed.setTextCursor(end);
+        t.key(Qt::Key_Return);
+        CHECK(t.ed.importFile(other.fileName()));
+        CHECK_EQ(t.ed.face(), QString("Roboto"));
+        CHECK_EQ(t.md(), QString("mine\n\ntheirs\n\n<!--font: Roboto-->\n"));
+    }
+
+    // an exported page carries the face with it: the styles it uses, no more
+    t.ed.loadMarkdown("plain words\n\n<!--font: EB Garamond-->\n");
+    QString html = pageHtml(t.ed.document(), t.ed.store(), "T");
+    CHECK_EQ(html.count("@font-face"), 1);
+    CHECK(html.contains("--face: \"EB Garamond\", serif; --scale: 1.16;") && html.contains("url(data:font/ttf;base64,AAEAAA"));
+    CHECK(!html.contains("&lt;!--font") && !html.contains("<!--font"));
+    t.ed.loadMarkdown("# Head\n\nsome *slanted* words\n\n<!--font: Computer Modern-->\n");
+    CHECK_EQ(pageHtml(t.ed.document(), t.ed.store(), "T").count("@font-face"), 3);
+    t.ed.loadMarkdown("# A *slanted* head\n\n<!--font: Computer Modern-->\n");
+    html = pageHtml(t.ed.document(), t.ed.store(), "T");
+    CHECK_EQ(html.count("@font-face"), 4);
+    CHECK(html.contains("font-family: \"CMU Serif\"; font-weight: 700; font-style: italic; src: url(data:font/otf;base64,T1RUTw"));
+    t.ed.loadMarkdown("some ***heavy slanted*** words\n\n<!--font: Computer Modern-->\n");
+    CHECK_EQ(pageHtml(t.ed.document(), t.ed.store(), "T").count("@font-face"), 4);
+    t.ed.loadMarkdown("some *slanted* words\n\n<!--font: Comic Relief-->\n");       // a family without italics
+    CHECK_EQ(pageHtml(t.ed.document(), t.ed.store(), "T").count("@font-face"), 1);
+    t.ed.loadMarkdown("plain words\n");
+    html = pageHtml(t.ed.document(), t.ed.store(), "T");
+    CHECK(!html.contains("@font-face") && html.contains("--scale: 1;"));
+
+    // in the window: the toolbar's box sets it, and a new document starts in the face picked last
+    QSettings().remove("font");
+    auto boxOf = [](MainWindow &w) {
+        QComboBox *box = nullptr;
+        for (QComboBox *b : w.findChildren<QComboBox *>())
+            if (b->toolTip().startsWith("Font"))
+                box = b;
+        return box;
+    };
+    {
+        MainWindow w;
+        w.show();
+        auto *ed = w.findChild<Editor *>();
+        QComboBox *box = boxOf(w);
+        CHECK(box && box->currentText() == "Default");
+        if (box) {
+            const int i = box->findText("Source Serif");
+            box->setCurrentIndex(i);
+            emit box->activated(i);
+            CHECK_EQ(ed->face(), QString("Source Serif"));
+            CHECK(w.isWindowModified());
+            int checked = 0;
+            for (QAction *a : w.findChildren<QAction *>())
+                if (a->isChecked() && a->data().toString() == "Source Serif")
+                    ++checked;
+            CHECK_EQ(checked, 1);
+            ed->undoStep();
+            CHECK_EQ(box->currentText(), QString("Default"));
+            CHECK(!w.isWindowModified());
+        }
+        w.close();
+    }
+    {
+        MainWindow w;
+        w.show();
+        auto *ed = w.findChild<Editor *>();
+        CHECK_EQ(ed->face(), QString("Source Serif"));
+        CHECK(!ed->document()->isModified() && ed->document()->isEmpty());
+        CHECK(boxOf(w) && boxOf(w)->currentText() == "Source Serif");
+        QFile old(dir.path() + "/old.md");      // a document from before there was a choice stays as it was
+        CHECK(old.open(QIODevice::WriteOnly));
+        old.write("old words\n");
+        old.close();
+        w.open(old.fileName());
+        CHECK_EQ(ed->face(), QString("Default"));
+        w.open(dir.path() + "/new.md");         // not there yet: a new document
+        CHECK_EQ(ed->face(), QString("Source Serif"));
+        CHECK(!w.isWindowModified());
+        w.close();
+    }
+    QSettings().remove("font");
+}
+
 // ---- window -----------------------------------------------------------------
 
 // The whole window, driven through its shortcuts as a person would.
@@ -934,6 +1175,7 @@ static void test_window()
     QFile f(path);
     CHECK(f.open(QIODevice::ReadOnly));
     CHECK_EQ(QString::fromUtf8(f.readAll()), want);
+    f.close();
     CHECK(!w.isWindowModified());
     CHECK(w.windowTitle().startsWith("first.md"));
 
@@ -1013,6 +1255,11 @@ static void test_dialogs()
 {
     Typist t;
     int missing = 0;
+#ifdef Q_OS_WIN
+    const QString shell = "powershell";     // the shell the language menu offers
+#else
+    const QString shell = "bash";
+#endif
     t.type("Energy ");
     QTimer::singleShot(300, [&] {
         auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget());
@@ -1077,7 +1324,7 @@ static void test_dialogs()
             return;
         }
         for (QAction *a : menu->actions()) {
-            if (a->text() == "bash") {
+            if (a->text() == shell) {
                 a->trigger();
                 break;
             }
@@ -1085,7 +1332,7 @@ static void test_dialogs()
         menu->close();
     });
     QTest::mouseClick(t.ed.viewport(), Qt::LeftButton, Qt::NoModifier, QPoint(t.ed.viewport()->width() - 100, 74));
-    CHECK(t.md().startsWith("```bash\nprint(1)\n```"));
+    CHECK(t.md().startsWith("```" + shell + "\nprint(1)\n```"));
     CHECK_EQ(missing, 0);
 }
 
@@ -1093,15 +1340,31 @@ static void test_dialogs()
 
 int main(int argc, char **argv)
 {
+    QTemporaryDir home;         // tests never touch the real settings, caches or recovery files
+#ifdef Q_OS_WIN
+    // Windows has no variables to point those elsewhere: Qt's test mode gives
+    // them folders of their own, which start out empty here. (And real windows:
+    // Qt's off-screen platform cannot show a message box there.)
+    QStandardPaths::setTestModeEnabled(true);
+    QSettings::setDefaultFormat(QSettings::IniFormat);
+    QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, home.path());
+#else
     if (qEnvironmentVariableIsEmpty("QT_QPA_PLATFORM"))
         qputenv("QT_QPA_PLATFORM", "offscreen");
-    QTemporaryDir home;         // tests never touch the real settings, caches or recovery files
     qputenv("XDG_CONFIG_HOME", (home.path() + "/config").toUtf8());
     qputenv("XDG_DATA_HOME", (home.path() + "/data").toUtf8());
     qputenv("XDG_CACHE_HOME", (home.path() + "/cache").toUtf8());
+#endif
     QApplication app(argc, argv);
     QCoreApplication::setOrganizationName("jotter");
     QCoreApplication::setApplicationName("jotter-tests");
+#ifdef Q_OS_WIN
+    for (const auto where : {QStandardPaths::GenericDataLocation, QStandardPaths::GenericCacheLocation, QStandardPaths::AppConfigLocation}) {
+        const QString dir = QStandardPaths::writableLocation(where);
+        if (dir.contains("qttest"))
+            QDir(dir).removeRecursively();
+    }
+#endif
     const QString filter = argc > 1 ? QString::fromLocal8Bit(argv[1]) : QString();
     const QVector<QPair<QString, std::function<void()>>> tests = {
         {"markdown_canonical", test_markdown_canonical},
@@ -1114,6 +1377,8 @@ int main(int argc, char **argv)
         {"editor_structure", test_editor_structure},
         {"editor_files", test_editor_files},
         {"spelling", test_spelling},
+        {"pdf", test_pdf},
+        {"fonts", test_fonts},
         {"window", test_window},
         {"dialogs", test_dialogs},
     };

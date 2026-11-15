@@ -5,6 +5,7 @@
 #include "mathtex.h"
 #include "model.h"
 #include "render.h"
+#include "theme.h"
 
 #include <KSyntaxHighlighting/AbstractHighlighter>
 #include <KSyntaxHighlighting/Definition>
@@ -12,11 +13,18 @@
 #include <KSyntaxHighlighting/Repository>
 #include <KSyntaxHighlighting/State>
 #include <KSyntaxHighlighting/Theme>
+#include <QCoreApplication>
+#include <QDir>
 #include <QFile>
 #include <QFileInfo>
 #include <QImageReader>
+#include <QProcess>
+#include <QRegularExpression>
+#include <QStandardPaths>
+#include <QTemporaryDir>
 #include <QTextDocument>
 #include <QTextList>
+#include <QTimer>
 #include <QUrl>
 
 namespace jot {
@@ -348,13 +356,138 @@ QString bodyHtml(const QTextDocument *doc, const AssetStore &store, bool embed)
     return html.out.join('\n');
 }
 
-QString pageHtml(const QTextDocument *doc, const AssetStore &store, const QString &title)
+// The document's text face, for a browser: its font files, carried inside the
+// page (only the styles the text uses), and what export.css needs to know.
+static QString faceCss(const Face &face, const QString &body)
+{
+    if (!face.builtIn())
+        return QString();
+    static const QRegularExpression strong(QStringLiteral("<(strong|b|h[1-6]|th)[ >]")), emphasis(QStringLiteral("<(em|i)[ >]")),
+        both(QStringLiteral("<strong><em>|<(h[1-6]|th)>(?:(?!</\\1>).)*<em>|<b[ >].*<i[ >]|<i[ >].*<b[ >]"));
+    const bool bold = body.contains(strong), italic = body.contains(emphasis), boldItalic = body.contains(both);
+    const bool upright = face.files.size() < 4;     // regular and bold only: a browser slants those itself
+    QString css;
+    for (int i = 0; i < face.files.size(); ++i) {
+        const bool isBold = upright ? i == 1 : i >= 2, isItalic = !upright && i % 2 == 1;
+        if (isBold && isItalic ? !boldItalic : (isBold && !bold) || (isItalic && !italic))
+            continue;
+        QFile file(":/fonts/" + face.files[i]);
+        if (!file.open(QIODevice::ReadOnly))
+            continue;
+        const bool otf = face.files[i].endsWith(".otf");
+        css += QString("@font-face { font-family: \"%1\"; font-weight: %2; font-style: %3; src: url(data:font/%4;base64,%5) format(\"%6\"); }\n")
+                   .arg(face.family, isBold ? "700" : "400", isItalic ? "italic" : "normal", otf ? "otf" : "ttf",
+                        QString::fromLatin1(file.readAll().toBase64()), otf ? "opentype" : "truetype");
+    }
+    return css + QString(":root { --face: \"%1\", %2; --scale: %3; }\n").arg(face.family, face.generic).arg(face.scale);
+}
+
+static QString page(const QTextDocument *doc, const AssetStore &store, const QString &title, const QString &moreCss)
 {
     QFile css(":/export.css");
     css.open(QIODevice::ReadOnly);
+    const QString body = bodyHtml(doc, store, true);
     return "<!doctype html>\n<html>\n<head>\n<meta charset=\"utf-8\">\n<title>" + title.toHtmlEscaped()
-        + "</title>\n<style>\n" + QString::fromUtf8(css.readAll()) + "</style>\n</head>\n<body>\n<article>\n"
-        + bodyHtml(doc, store, true) + "\n</article>\n</body>\n</html>\n";
+        + "</title>\n<style>\n" + QString::fromUtf8(css.readAll()) + faceCss(faceNamed(faceOf(doc)), body) + moreCss
+        + "</style>\n</head>\n<body>\n<article>\n" + body + "\n</article>\n</body>\n</html>\n";
+}
+
+QString pageHtml(const QTextDocument *doc, const AssetStore &store, const QString &title)
+{
+    return page(doc, store, title, QString());
+}
+
+// ---- PDF ------------------------------------------------------------------------
+
+static QString pdfHelper()
+{
+    const QString beside = QCoreApplication::applicationDirPath() + "/jotter-pdf";
+    for (const QString &path : {beside, beside + ".exe"})
+        if (QFile::exists(path))
+            return path;
+    return QStandardPaths::findExecutable("jotter-pdf");
+}
+
+static QString pdfBrowser()
+{
+#ifdef Q_OS_WIN
+    for (const char *exe : {"/Microsoft/Edge/Application/msedge.exe", "/Google/Chrome/Application/chrome.exe"}) {
+        for (const char *root : {"ProgramFiles(x86)", "ProgramFiles", "LOCALAPPDATA"}) {
+            const QString path = QDir::fromNativeSeparators(qEnvironmentVariable(root)) + exe;
+            if (QFile::exists(path))
+                return path;
+        }
+    }
+#else
+    for (const char *name : {"google-chrome", "chromium", "chromium-browser", "microsoft-edge", "brave-browser"}) {
+        const QString path = QStandardPaths::findExecutable(name);
+        if (!path.isEmpty())
+            return path;
+    }
+#endif
+    return QString();
+}
+
+// The printing program has ended: is the file there? (A browser's first process
+// can end before the rest of it has written the file, so that gets a few seconds.)
+static void pdfWritten(bool ran, const QString &path, int waits, const std::function<void(bool)> &then)
+{
+    const bool there = QFileInfo(path).size() > 0;
+    if (ran && !there && waits > 0)
+        QTimer::singleShot(200, qApp, [=] { pdfWritten(ran, path, waits - 1, then); });
+    else
+        then(ran && there);
+}
+
+bool canExportPdf(bool browserOnly)
+{
+    return (!browserOnly && !pdfHelper().isEmpty()) || !pdfBrowser().isEmpty();
+}
+
+void exportPdf(const QTextDocument *doc, const AssetStore &store, const QString &title, const QString &path,
+               const QString &paper, QObject *owner, std::function<void(bool ok)> done, bool browserOnly)
+{
+    const QString helper = browserOnly ? QString() : pdfHelper();
+    const QString browser = helper.isEmpty() ? pdfBrowser() : QString();
+    // A scratch folder for the page (and for the browser to keep its own files in).
+    auto *dir = new QTemporaryDir(QDir::tempPath() + "/jotter-pdf-XXXXXX");
+    const QString input = dir->path() + "/page.html";
+    QFile file(input);
+    if (file.open(QIODevice::WriteOnly)) {
+        // The helper is told the paper and margins; a browser reads them from the page.
+        const QString layout = browser.isEmpty() ? QString()
+            : QString("@page { size: %1; margin: 22mm 22mm 24mm 22mm; }\n").arg(paper == "a4" ? "A4" : "letter");
+        file.write(page(doc, store, title, layout).toUtf8());
+    }
+    file.close();
+    QFile::remove(path);        // so that finding it afterwards means it was written
+
+    auto *proc = new QProcess(owner);
+    auto finish = [proc, dir, path, done, waits = browser.isEmpty() ? 0 : 50](bool ran) {
+        proc->deleteLater();
+        pdfWritten(ran, path, waits, [dir, done](bool ok) {
+            const QString scratch = dir->path();
+            delete dir;
+            // (a browser can still be letting go of its files for a moment)
+            QTimer::singleShot(3000, qApp, [scratch] { QDir(scratch).removeRecursively(); });
+            done(ok);
+        });
+    };
+    QObject::connect(proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), owner,
+                     [finish](int code, QProcess::ExitStatus status) { finish(status == QProcess::NormalExit && code == 0); });
+    QObject::connect(proc, &QProcess::errorOccurred, owner, [finish](QProcess::ProcessError error) {
+        if (error == QProcess::FailedToStart)
+            finish(false);
+    });
+    QTimer::singleShot(120000, proc, &QProcess::kill);
+    if (!helper.isEmpty()) {
+        proc->start(helper, {input, path, paper});
+    } else {
+        proc->start(browser, {"--headless", "--disable-gpu", "--no-first-run", "--no-default-browser-check",
+                              "--user-data-dir=" + QDir::toNativeSeparators(dir->path() + "/browser"),
+                              "--no-pdf-header-footer", "--print-to-pdf-no-header",
+                              "--print-to-pdf=" + QDir::toNativeSeparators(path), QUrl::fromLocalFile(input).toString()});
+    }
 }
 
 }  // namespace jot

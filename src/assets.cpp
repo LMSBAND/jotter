@@ -11,7 +11,8 @@ namespace jot {
 
 bool hasScheme(const QString &src)
 {
-    static const QRegularExpression rx(QStringLiteral("^[A-Za-z][A-Za-z0-9+.-]*:"));
+    // (two letters at least: "C:" starts a Windows path)
+    static const QRegularExpression rx(QStringLiteral("^[A-Za-z][A-Za-z0-9+.-]+:"));
     return rx.match(src).hasMatch();
 }
 

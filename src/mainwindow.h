@@ -54,7 +54,9 @@ private:
     void replaceAll();
 
     void zoomBy(int steps);
-    void chooseFont();
+    void pickFace(const QString &name);
+    void updateFace();
+    QString blank() const;
     void insertPicture();
     void insertTable();
     void insertPlot();
@@ -70,7 +72,8 @@ private:
     QTimer m_recoveryTimer, m_wordTimer;
     QWidget *m_findBar = nullptr;
     QLineEdit *m_find = nullptr, *m_replace = nullptr;
-    QComboBox *m_style = nullptr;
+    QComboBox *m_style = nullptr, *m_face = nullptr;
+    QMenu *m_faces = nullptr;
     QLabel *m_words = nullptr, *m_kernel = nullptr;
     QMenu *m_recent = nullptr;
     QAction *m_bold = nullptr, *m_italic = nullptr, *m_underline = nullptr, *m_strike = nullptr, *m_code = nullptr,

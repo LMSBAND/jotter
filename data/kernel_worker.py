@@ -7,6 +7,7 @@ uses the standard library only.
   stdin    one JSON request per line:
              {"op": "exec", "id": n, "code": "...", "figdir": "/path"}
              {"op": "chdir", "path": "/path"}
+             {"op": "interrupt"}        (Windows; elsewhere Jotter sends SIGINT)
   stdout   whatever the cell prints (stderr is merged in by the parent),
            interleaved with control records of the form  \\x1e{json}\\n :
              {"type": "image", "name": "out-<hash>.png"}   written into figdir
@@ -22,6 +23,7 @@ import json
 import linecache
 import os
 import sys
+import time
 import traceback
 
 MARK = "\x1e"
@@ -123,6 +125,43 @@ def display(*values):
         show(v)
 
 
+# ---- !commands -------------------------------------------------------------
+
+def shell(command):
+    """Run a `!command` line; what it prints goes where print() goes."""
+    import subprocess
+    if os.name != "nt":
+        subprocess.run(command, shell=True)
+        return
+    # Windows: commands print in whichever code page they please, and waiting
+    # for one cannot be interrupted. So read what it prints and pass that on as
+    # text, and wait in short steps.
+    import threading
+    proc = subprocess.Popen(command, shell=True, stdin=subprocess.DEVNULL,
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+
+    def relay():
+        for raw in proc.stdout:
+            try:
+                text = raw.decode("utf-8")
+            except UnicodeDecodeError:
+                text = raw.decode("oem", "replace")
+            sys.stdout.write(text.replace("\r\n", "\n"))
+
+    reader = threading.Thread(target=relay, daemon=True)
+    reader.start()
+    try:
+        while proc.poll() is None:
+            time.sleep(0.02)
+    except BaseException:       # stopped: take down the command and whatever it started
+        if subprocess.call(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL):
+            proc.kill()
+        raise
+    finally:
+        reader.join(1)          # (something it left running may keep the pipe open: do not wait for that)
+
+
 # ---- running cells ---------------------------------------------------------
 
 def preprocess(code):
@@ -133,7 +172,7 @@ def preprocess(code):
         body = line.lstrip()
         indent = line[:len(line) - len(body)]
         if body.startswith("!"):
-            line = "%s__import__('subprocess').run(%r, shell=True)" % (indent, body[1:])
+            line = "%s__import__('__main__').shell(%r)" % (indent, body[1:])
         elif body.startswith("%matplotlib"):
             line = indent + "pass"
         lines.append(line)
@@ -172,6 +211,65 @@ def run_cell(code, n, ns):
     return ok
 
 
+# ---- requests --------------------------------------------------------------
+
+def parse(line):
+    try:
+        req = json.loads(line)
+    except ValueError:
+        return {}
+    return req if isinstance(req, dict) else {}
+
+
+class WindowsInbox:
+    """Windows cannot signal a busy process. There Jotter asks for an interrupt
+    on the control channel, a thread reads that channel while the cell runs,
+    and the interrupt is raised from in here."""
+
+    def __init__(self, ctrl):
+        import queue
+        import threading
+        self.lines = queue.Queue()
+        self.lock = threading.Lock()
+        self.busy = False
+        threading.Thread(target=self.read, args=(ctrl,), daemon=True).start()
+
+    def read(self, ctrl):
+        import signal
+        interrupt = getattr(signal, "raise_signal", None)
+        if interrupt is None:               # Python before 3.8
+            import _thread
+            interrupt = lambda signum: _thread.interrupt_main()
+        for line in iter(ctrl.readline, ""):
+            if parse(line).get("op") == "interrupt":
+                with self.lock:
+                    if self.busy:           # between cells there is nothing to stop
+                        interrupt(signal.SIGINT)
+            else:
+                self.lines.put(line)
+        self.lines.put("")                  # Jotter has gone
+
+    def readline(self):
+        return self.lines.get()
+
+    def start(self):
+        with self.lock:
+            self.busy = True
+
+    def finish(self):
+        # The cell is over. No interrupt may be raised from here on, and one
+        # raised a moment ago has to land now rather than on the next request.
+        while True:
+            try:
+                with self.lock:
+                    self.busy = False
+                for _ in range(10):
+                    pass
+                return
+            except KeyboardInterrupt:
+                pass
+
+
 def main():
     global FIGDIR
     # Keep the control channel to ourselves: the cell sees an empty stdin.
@@ -179,9 +277,15 @@ def main():
     null = os.open(os.devnull, os.O_RDONLY)
     os.dup2(null, 0)
     os.close(null)
+    inbox = None
+    if os.name == "nt":
+        inbox = WindowsInbox(ctrl)
+        for stream in (sys.stdout, sys.stderr):
+            stream.reconfigure(newline="\n")    # print() ends lines the same way everywhere
+    readline = inbox.readline if inbox else ctrl.readline
 
-    here = os.path.dirname(os.path.abspath(__file__))
-    sys.path[:] = [""] + [p for p in sys.path if p and os.path.abspath(p) != here]
+    here = os.path.normcase(os.path.dirname(os.path.abspath(__file__)))
+    sys.path[:] = [""] + [p for p in sys.path if p and os.path.normcase(os.path.abspath(p)) != here]
     sys.meta_path.insert(0, _Backend())
     os.environ["MPLBACKEND"] = "module://jotter_mpl"
 
@@ -190,21 +294,24 @@ def main():
     n = 0
     while True:
         try:
-            line = ctrl.readline()
+            line = readline()
         except KeyboardInterrupt:
             continue
         if not line:
             break
-        try:
-            req = json.loads(line)
-        except ValueError:
-            continue
+        req = parse(line)
         op = req.get("op")
         if op == "exec":
             n += 1
             FIGDIR = req.get("figdir") or "."
             try:
-                ok = run_cell(req.get("code", ""), n, ns)
+                try:
+                    if inbox:
+                        inbox.start()
+                    ok = run_cell(req.get("code", ""), n, ns)
+                finally:
+                    if inbox:
+                        inbox.finish()
             except KeyboardInterrupt:
                 ok = False
                 send(type="error", text="KeyboardInterrupt")

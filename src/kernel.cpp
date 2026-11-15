@@ -6,6 +6,7 @@
 #include <QCryptographicHash>
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QProcessEnvironment>
@@ -13,6 +14,9 @@
 #include <QTemporaryDir>
 #include <QTextCodec>
 #include <csignal>
+#ifdef Q_OS_WIN
+#include <qt_windows.h>
+#endif
 
 // The worker script is compiled in as a Qt resource (data/resources.qrc).
 static void initResources()
@@ -31,13 +35,22 @@ bool isPython(const QString &name)
     return name == "python" || name == "python3" || name == "py" || name == "ipython";
 }
 
-struct Runner { QString ext, command; };
+struct Runner { QString ext, command, prelude = QString(); };
 
 // language -> how to run it. {file} is the cell's source, {out} a .png the tool
-// may write, {tmp} a scratch directory.
+// may write, {exe} the program a compiler is to produce. A prelude is put in
+// front of the cell's source.
 const QHash<QString, Runner> &runners()
 {
     static const QHash<QString, Runner> table = {
+#ifdef Q_OS_WIN
+        {"powershell", {".ps1", "powershell -NoProfile -ExecutionPolicy Bypass -File {file}"}},
+        {"ps1", {".ps1", "powershell -NoProfile -ExecutionPolicy Bypass -File {file}"}},
+        {"pwsh", {".ps1", "pwsh -NoProfile -File {file}"}},
+        {"batch", {".bat", "cmd /D /C {file}"}},
+        {"bat", {".bat", "cmd /D /C {file}"}},
+        {"cmd", {".bat", "cmd /D /C {file}"}},
+#endif
         {"bash", {".sh", "bash {file}"}},
         {"sh", {".sh", "sh {file}"}},
         {"zsh", {".sh", "zsh {file}"}},
@@ -48,25 +61,55 @@ const QHash<QString, Runner> &runners()
         {"ruby", {".rb", "ruby {file}"}},
         {"perl", {".pl", "perl {file}"}},
         {"r", {".R", "Rscript {file}"}},
-        {"c", {".c", "gcc {file} -o {tmp}/a.out -lm && {tmp}/a.out"}},
-        {"cpp", {".cpp", "g++ {file} -o {tmp}/a.out && {tmp}/a.out"}},
-        {"c++", {".cpp", "g++ {file} -o {tmp}/a.out && {tmp}/a.out"}},
-        {"rust", {".rs", "rustc {file} -o {tmp}/a.out && {tmp}/a.out"}},
+        {"c", {".c", "gcc {file} -o {exe} -lm && {exe}"}},
+        {"cpp", {".cpp", "g++ {file} -o {exe} && {exe}"}},
+        {"c++", {".cpp", "g++ {file} -o {exe} && {exe}"}},
+        {"rust", {".rs", "rustc {file} -o {exe} && {exe}"}},
         {"go", {".go", "go run {file}"}},
         {"lean", {".lean", "lean {file}"}},
         {"lean4", {".lean", "lean {file}"}},
         {"dot", {".dot", "dot -Tpng -Gdpi=192 -o {out} {file}"}},
         {"graphviz", {".dot", "dot -Tpng -Gdpi=192 -o {out} {file}"}},
-        {"gnuplot", {".gp", "gnuplot -e \"set terminal pngcairo size 1228,920 fontscale 2 linewidth 2; set output '{out}'\" {file}"}},
+        {"gnuplot", {".gp", "gnuplot {file}",
+                     "set terminal pngcairo size 1228,920 fontscale 2 linewidth 2\nset output '{out}'\n"}},
         {"mermaid", {".mmd", "mmdc -i {file} -o {out} -s 2 -b transparent"}},
     };
     return table;
 }
 
+#ifdef Q_OS_WIN
+const char *const kSystemPython = "python";     // (python3.exe there is the Store's "install Python" stub)
+
+QString shellQuote(const QString &path)
+{
+    return '"' + QDir::toNativeSeparators(path) + '"';
+}
+
+// What a tool printed: UTF-8 from most, the console's code page from the
+// system's own commands.
+QString decodeOutput(const QByteArray &bytes)
+{
+    QTextCodec::ConverterState state;
+    const QString text = QTextCodec::codecForName("UTF-8")->toUnicode(bytes.constData(), bytes.size(), &state);
+    if (state.invalidChars == 0 && state.remainingChars == 0)
+        return text;
+    QString wide(MultiByteToWideChar(CP_OEMCP, 0, bytes.constData(), bytes.size(), nullptr, 0), Qt::Uninitialized);
+    MultiByteToWideChar(CP_OEMCP, 0, bytes.constData(), bytes.size(), reinterpret_cast<wchar_t *>(wide.data()), wide.size());
+    return wide;
+}
+#else
+const char *const kSystemPython = "python3";
+
 QString shellQuote(QString s)
 {
     return "'" + s.replace("'", "'\\''") + "'";
 }
+
+QString decodeOutput(const QByteArray &bytes)
+{
+    return QString::fromUtf8(bytes);
+}
+#endif
 
 // A Lean cell inside a Lake project should see the project's imports.
 QString lakeRoot(const QString &start)
@@ -95,7 +138,11 @@ Kernel::Kernel(QObject *parent) : QObject(parent) {}
 
 QString bundledPython()
 {
+#ifdef Q_OS_WIN
+    const QString path = QCoreApplication::applicationDirPath() + "/python/python.exe";
+#else
     const QString path = QDir::cleanPath(QCoreApplication::applicationDirPath() + "/../python/bin/python3");
+#endif
     return QFile::exists(path) ? path : QString();
 }
 
@@ -104,12 +151,12 @@ QString defaultPython()
     static QString found;
     if (!found.isEmpty())
         return found;
-    found = QStringLiteral("python3");
+    found = QString::fromLatin1(kSystemPython);
     const QString bundled = bundledPython();
     if (!bundled.isEmpty()) {
         // The machine's own Python has the user's other packages, so it wins if it can plot.
         QProcess probe;
-        probe.start("python3", {"-c", "import numpy, matplotlib"});
+        probe.start(found, {"-c", "import numpy, matplotlib"});
         const bool ok = probe.waitForFinished(10000) && probe.exitStatus() == QProcess::NormalExit && probe.exitCode() == 0;
         if (!ok) {
             probe.kill();
@@ -125,8 +172,14 @@ QProcessEnvironment pythonEnvironment(const QString &python)
     QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
     env.insert("PYTHONIOENCODING", "utf-8");
     env.insert("PYTHONUNBUFFERED", "1");
-    if (python == bundledPython())
+    if (python == bundledPython()) {
         env.insert("PYTHONNOUSERSITE", "1");    // the shipped Python uses the packages shipped with it, nothing else
+#ifdef Q_OS_WIN
+        // ...and is the one that "!python" and "!pip" in a cell mean.
+        const QString dir = QDir::toNativeSeparators(QFileInfo(python).absolutePath());
+        env.insert("PATH", dir + ";" + dir + "\\Scripts;" + env.value("PATH"));
+#endif
+    }
     return env;
 }
 
@@ -171,8 +224,13 @@ void Kernel::interrupt()
         return;
     if (m_once)
         m_once->kill();
-    else if (m_py && m_py->state() == QProcess::Running)
+    else if (m_py && m_py->state() == QProcess::Running) {
+#ifdef Q_OS_WIN
+        send({{"op", "interrupt"}});        // no signals there: the worker raises it in itself
+#else
         ::kill(pid_t(m_py->processId()), SIGINT);
+#endif
+    }
 }
 
 void Kernel::restart()
@@ -353,8 +411,12 @@ void Kernel::runOnce(Job *job)
     job->tmp = dir.path();
     const QString src = job->tmp + "/cell" + runner.ext, out = job->tmp + "/out.png";
     QFile f(src);
-    if (f.open(QIODevice::WriteOnly))
+    if (f.open(QIODevice::WriteOnly)) {
+        if (runner.ext == ".ps1")
+            f.write("\xEF\xBB\xBF");        // Windows PowerShell reads a script as UTF-8 only if it says so
+        f.write(QString(runner.prelude).replace("{out}", QString(out).replace("'", "''")).toUtf8());
         f.write(job->code.toUtf8() + "\n");
+    }
     f.close();
 
     QString cwd = job->cwd, command = runner.command;
@@ -365,7 +427,12 @@ void Kernel::runOnce(Job *job)
             command = "lake env " + command;
         }
     }
-    command.replace("{file}", shellQuote(src)).replace("{out}", shellQuote(out)).replace("{tmp}", shellQuote(job->tmp));
+#ifdef Q_OS_WIN
+    const QString exe = job->tmp + "/a.exe";
+#else
+    const QString exe = job->tmp + "/a.out";
+#endif
+    command.replace("{file}", shellQuote(src)).replace("{out}", shellQuote(out)).replace("{exe}", shellQuote(exe));
 
     QProcess *p = m_once = new QProcess(this);
     p->setProcessChannelMode(QProcess::MergedChannels);
@@ -379,7 +446,7 @@ void Kernel::runOnce(Job *job)
         if (!job)
             return;
         const bool ok = status == QProcess::NormalExit && code == 0;
-        const QString printed = QString::fromUtf8(p->readAllStandardOutput());
+        const QString printed = decodeOutput(p->readAllStandardOutput());
         if (!printed.trimmed().isEmpty())
             job->add(printed, ok ? Item::Text : Item::Error);
         QFile pic(out);
@@ -406,7 +473,12 @@ void Kernel::runOnce(Job *job)
             finish(false);
         }
     });
+#ifdef Q_OS_WIN
+    p->setNativeArguments("/D /S /C \"" + command + "\"");     // (/S: the command line is taken as written)
+    p->start("cmd.exe", QStringList());
+#else
     p->start("sh", {"-c", command});
+#endif
     p->closeWriteChannel();
 }
 

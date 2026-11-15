@@ -36,6 +36,8 @@ public:
     // ---- looks -------------------------------------------------------------
     Theme theme;
     void applyTheme();
+    QString face() const { return m_face; }     // the text face the document is set in, as the menu names it
+    void setFace(const QString &name);          // an edit: it is saved with the document and can be undone
     Renderer *renderer() const { return m_renderer; }
     Kernel *kernel() const { return m_kernel; }
 
@@ -91,6 +93,7 @@ public slots:
 signals:
     void status(const QString &message);
     void cellsChanged();                    // something started or stopped running
+    void faceChanged();                     // the document's text face is another one now
     void zoomRequested(int steps);          // Ctrl+wheel
     void filesDropped(const QStringList &paths);    // Markdown/text files dropped or pasted onto the page
 
@@ -116,6 +119,7 @@ private:
     void dirtyBlocks(QTextBlock *first, QTextBlock *last) const;
     void normalizeRange(const QTextBlock &first, const QTextBlock &last, bool join);
     void replay(bool undo);
+    bool followFace();
 
     // typing
     bool handleEnter(QTextCursor &c);
@@ -158,6 +162,7 @@ private:
     QHash<int, QPair<QRectF, int>> m_objects;       // where inline objects were last painted (document coords)
     QHash<QString, QImage> m_mathImages;
     bool m_normalizing = false, m_replaying = false;
+    QString m_face;                                 // the face the theme was last set up for
     int m_dirtyFrom = -1, m_dirtyTo = -1;
     QVector<QTextCursor> m_queue;                   // cells waiting to run
     QTextCursor m_running;

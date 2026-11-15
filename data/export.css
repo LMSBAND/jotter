@@ -1,15 +1,20 @@
-:root { --text: #1f2328; --muted: #6b7280; --rule: #dcdfe4; --code-bg: #f5f6f8; --link: #1a5fb4; }
+:root { --text: #1f2328; --muted: #6b7280; --rule: #dcdfe4; --code-bg: #f5f6f8; --link: #1a5fb4;
+        --face: "Inter", "Noto Sans", "Segoe UI", "Helvetica Neue", Arial, sans-serif; --scale: 1; }
+/* --face and --scale are the document's text face (the exporter sets them): its
+   letters are drawn --scale times the type size, so that every face looks as
+   big. Lines stay as far apart, and code and formulas stay the size they were. */
 html { font-size: 11pt; }
-body { margin: 0; color: var(--text); background: #fff; line-height: 1.45;
-       font-family: "Inter", "Noto Sans", "Helvetica Neue", Arial, sans-serif; }
-article { max-width: 46em; margin: 3em auto; padding: 0 1.5em; }
+body { margin: 0; color: var(--text); background: #fff; font-family: var(--face);
+       font-size: calc(1em * var(--scale)); line-height: 1.45rem; }
+article { max-width: calc(46em / var(--scale)); margin: 3em auto; padding: 0 1.5em; }
 article > :first-child { margin-top: 0; }
 h1, h2, h3, h4, h5, h6 { line-height: 1.2; margin: 1.4em 0 0.5em; break-after: avoid; }
 h1 { font-size: 2em; } h2 { font-size: 1.5em; } h3 { font-size: 1.25em; } h4 { font-size: 1.1em; }
 h5, h6 { font-size: 1em; }
 p { margin: 0 0 0.8em; }
 a { color: var(--link); }
-code, pre { font-family: "Hack", "DejaVu Sans Mono", "Liberation Mono", monospace; font-size: 0.9em; }
+code, pre { font-family: "Hack", "DejaVu Sans Mono", "Liberation Mono", Consolas, monospace; font-size: calc(0.9em / var(--scale)); }
+pre > code { font-size: 0.9em; }
 :not(pre) > code { background: #eef0f2; padding: 0.1em 0.3em; border-radius: 3px; }
 pre { margin: 0 0 0.8em; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.3; }
 pre.code { background: var(--code-bg); border: 1px solid var(--rule); border-radius: 6px; padding: 0.6em 0.9em; }
@@ -19,7 +24,7 @@ pre.error { color: #c5221f; border-left-color: #c5221f; }
 p.figure { text-align: center; break-inside: avoid; }
 p.math { text-align: center; margin: 1em 0; break-inside: avoid; }
 img { max-width: 100%; height: auto; }
-img.math { max-width: none; }
+img.math { max-width: none; font-size: calc(1em / var(--scale)); }
 blockquote { margin: 0 0 0.8em; padding-left: 1em; border-left: 3px solid var(--rule); color: var(--muted); }
 blockquote p:last-child { margin-bottom: 0; }
 ul, ol { margin: 0 0 0.8em; padding-left: 1.7em; }

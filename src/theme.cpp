@@ -4,10 +4,13 @@
 #include <QFile>
 #include <QFontDatabase>
 #include <QFontInfo>
+#include <QFontMetricsF>
 #include <QGuiApplication>
+#include <QHash>
 #include <QImageReader>
 #include <QPalette>
 #include <QScreen>
+#include <cmath>
 
 namespace jot {
 
@@ -45,6 +48,97 @@ static QString pick(const QStringList &candidates, const QString &fallback)
     return fallback;
 }
 
+static qreal pxPerPt()
+{
+    const QScreen *screen = QGuiApplication::primaryScreen();
+    return (screen ? screen->logicalDotsPerInchY() : 96.0) / 72.0;
+}
+
+// ---- faces --------------------------------------------------------------------
+
+const QVector<Face> &faces()
+{
+    auto files = [](const QString &stem, const QStringList &styles, const QString &ext = QStringLiteral(".ttf")) {
+        QStringList out;
+        for (const QString &style : styles)
+            out << stem + style + ext;
+        return out;
+    };
+    const QStringList four = {"Regular", "Italic", "Bold", "BoldItalic"};
+    // (the sizes: x-heights brought to about half an em, which is where the system fonts have theirs)
+    static const QVector<Face> all = {
+        {"Default", QString(), {}, 1.0, QString()},
+        {"Roboto", "Roboto", files("roboto/Roboto-", four), 1.0, "sans-serif"},
+        {"Atkinson Hyperlegible", "Atkinson Hyperlegible Next", files("atkinson/AtkinsonHyperlegibleNext-", four), 1.03, "sans-serif"},
+        {"EB Garamond", "EB Garamond", files("ebgaramond/EBGaramond-", four), 1.16, "serif"},
+        {"Source Serif", "Source Serif 4", files("sourceserif/SourceSerif4-", {"Regular", "It", "Bold", "BoldIt"}), 1.06, "serif"},
+        // (Computer Modern is what formulas are set in: at this size the text is exactly as big as they are)
+        {"Computer Modern", "CMU Serif", files("cmu/cmun", {"rm", "ti", "bx", "bi"}, ".otf"), 1.15, "serif"},
+        {"Courier Prime", "Courier Prime", files("courierprime/CourierPrime-", four), 1.04, "monospace"},
+        {"Comic Relief", "Comic Relief", files("comicrelief/ComicRelief-", {"Regular", "Bold"}), 0.97, "cursive"},
+    };
+    return all;
+}
+
+const Face &faceNamed(const QString &name)
+{
+    const QString wanted = name.trimmed();
+    for (const Face &face : faces())
+        if (face.builtIn() && face.name.compare(wanted, Qt::CaseInsensitive) == 0)
+            return face;
+    return faces().first();
+}
+
+// The family Qt has a built-in face under. Its files are handed to Qt the first
+// time it is asked for, so starting up costs nothing for faces not in use.
+static QString familyOf(const Face &face)
+{
+    static QHash<QString, QString> known;
+    auto it = known.constFind(face.name);
+    if (it == known.constEnd()) {
+        QString family;
+        for (const QString &file : face.files) {
+            const int id = QFontDatabase::addApplicationFont(":/fonts/" + file);
+            if (family.isEmpty() && id >= 0)
+                family = QFontDatabase::applicationFontFamilies(id).value(0);
+        }
+        it = known.insert(face.name, family);
+    }
+    return *it;
+}
+
+QFont fontOf(const Face &face, qreal pointSize)
+{
+    const QString family = face.builtIn() ? familyOf(face) : QString();
+    QFont font = family.isEmpty() ? QGuiApplication::font() : QFont(family);
+    font.setPointSizeF(pointSize * (family.isEmpty() ? 1.0 : face.scale));
+    return font;
+}
+
+void Theme::setFace(const Face &face)
+{
+    const QString family = face.builtIn() ? familyOf(face) : QString();
+    body = family.isEmpty() ? ui : family;
+    bodyScale = family.isEmpty() ? 1.0 : face.scale;
+    bodyHint = QFont::AnyStyle;
+    leading = 1.0;
+    if (family.isEmpty())
+        return;
+    // (for the letters a face lacks: borrowed from a font of the same kind)
+    bodyHint = face.generic == "serif" ? QFont::Serif : face.generic == "monospace" ? QFont::Monospace : QFont::SansSerif;
+    // Fonts differ a lot in how tall they say a line is. Every built-in face is
+    // given the line of one that says 1.2 em, so that changing face changes the
+    // letters and not how much room the text takes. (Measured at zoom 1, in
+    // whole pixels as the layout does: spacing is kept in the document, and
+    // must not follow zoom.)
+    QFont probe(family);
+    probe.setPointSizeF(size * bodyScale);
+    const QFontMetricsF fm(probe);
+    const qreal natural = std::ceil(fm.ascent() + fm.descent() + fm.leading());
+    if (natural > 0)
+        leading = std::round(1.2 * size * pxPerPt()) / natural;
+}
+
 bool Theme::systemIsDark()
 {
     return QGuiApplication::palette().color(QPalette::Window).lightness() < 128;
@@ -53,10 +147,15 @@ bool Theme::systemIsDark()
 Theme::Theme(bool isDark) : dark(isDark)
 {
     const QFont fixed = QFontDatabase::systemFont(QFontDatabase::FixedFont);
-    body = pick({"Inter", "Noto Sans", "Ubuntu"}, QGuiApplication::font().family());
+    ui = body = pick({"Inter", "Noto Sans", "Ubuntu"}, QGuiApplication::font().family());
+#ifdef Q_OS_WIN
+    // (what Windows itself answers is Courier New)
+    mono = pick({"Cascadia Mono", "Consolas", "Lucida Console", "Liberation Mono", "DejaVu Sans Mono"}, fixed.family());
+#else
     mono = QFontInfo(fixed).fixedPitch()
         ? fixed.family()
         : pick({"Hack", "JetBrains Mono", "DejaVu Sans Mono", "Ubuntu Mono", "Liberation Mono"}, "monospace");
+#endif
 
     const QColor highlight = QGuiApplication::palette().color(QPalette::Highlight);
     if (dark) {
@@ -88,9 +187,7 @@ Theme::Theme(bool isDark) : dark(isDark)
 
 qreal Theme::em() const
 {
-    const QScreen *screen = QGuiApplication::primaryScreen();
-    const qreal dpi = screen ? screen->logicalDotsPerInchY() : 96.0;
-    return pt() * dpi / 72.0;
+    return pt() * pxPerPt();
 }
 
 qreal Theme::layoutEm() const
@@ -101,6 +198,15 @@ qreal Theme::layoutEm() const
 QFont Theme::bodyFont(qreal scale) const
 {
     QFont f(body);
+    if (bodyHint != QFont::AnyStyle)
+        f.setStyleHint(bodyHint);
+    f.setPointSizeF(bodyPt() * scale);
+    return f;
+}
+
+QFont Theme::uiFont(qreal scale) const
+{
+    QFont f(ui);
     f.setPointSizeF(pt() * scale);
     return f;
 }

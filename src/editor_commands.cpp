@@ -894,7 +894,12 @@ void Editor::languageMenu(const QTextBlock &head, const QPoint &globalPos)
         if (h.isValid())
             setCellLanguage(h, lang);
     };
-    for (const char *lang : {"python", "bash", "javascript", "c", "cpp", "lean", "dot", "json", "yaml", "html", "sql"}) {
+#ifdef Q_OS_WIN
+    const char *const shell = "powershell";
+#else
+    const char *const shell = "bash";
+#endif
+    for (const char *lang : {"python", shell, "javascript", "c", "cpp", "lean", "dot", "json", "yaml", "html", "sql"}) {
         QAction *a = menu.addAction(QString::fromLatin1(lang), this, [choose, lang] { choose(QString::fromLatin1(lang)); });
         a->setCheckable(true);
         a->setChecked(current == QLatin1String(lang));

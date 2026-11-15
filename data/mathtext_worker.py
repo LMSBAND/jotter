@@ -33,7 +33,8 @@ def main(folder):
                 error = str(e).strip().split("\n")[-1] or error
                 error = error.split(", found ")[0].replace("ParseFatalException: ", "").replace("ParseException: ", "")
         if result is None and "\\begin" in tex:
-            error = "matrices and aligned equations need LaTeX installed (texlive-latex-base)"
+            error = "matrices and aligned equations need LaTeX installed (%s)" % (
+                "pdflatex and pdftocairo, as in MiKTeX" if os.name == "nt" else "texlive-latex-base")
         if result is None:
             out.append({"error": error})
             continue

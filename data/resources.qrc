@@ -4,6 +4,32 @@
     <file>jotter.svg</file>
     <file>export.css</file>
     <file>mathtext_worker.py</file>
+    <file>fonts/atkinson/AtkinsonHyperlegibleNext-Bold.ttf</file>
+    <file>fonts/atkinson/AtkinsonHyperlegibleNext-BoldItalic.ttf</file>
+    <file>fonts/atkinson/AtkinsonHyperlegibleNext-Italic.ttf</file>
+    <file>fonts/atkinson/AtkinsonHyperlegibleNext-Regular.ttf</file>
+    <file>fonts/cmu/cmunbi.otf</file>
+    <file>fonts/cmu/cmunbx.otf</file>
+    <file>fonts/cmu/cmunrm.otf</file>
+    <file>fonts/cmu/cmunti.otf</file>
+    <file>fonts/comicrelief/ComicRelief-Bold.ttf</file>
+    <file>fonts/comicrelief/ComicRelief-Regular.ttf</file>
+    <file>fonts/courierprime/CourierPrime-Bold.ttf</file>
+    <file>fonts/courierprime/CourierPrime-BoldItalic.ttf</file>
+    <file>fonts/courierprime/CourierPrime-Italic.ttf</file>
+    <file>fonts/courierprime/CourierPrime-Regular.ttf</file>
+    <file>fonts/ebgaramond/EBGaramond-Bold.ttf</file>
+    <file>fonts/ebgaramond/EBGaramond-BoldItalic.ttf</file>
+    <file>fonts/ebgaramond/EBGaramond-Italic.ttf</file>
+    <file>fonts/ebgaramond/EBGaramond-Regular.ttf</file>
+    <file>fonts/roboto/Roboto-Bold.ttf</file>
+    <file>fonts/roboto/Roboto-BoldItalic.ttf</file>
+    <file>fonts/roboto/Roboto-Italic.ttf</file>
+    <file>fonts/roboto/Roboto-Regular.ttf</file>
+    <file>fonts/sourceserif/SourceSerif4-Bold.ttf</file>
+    <file>fonts/sourceserif/SourceSerif4-BoldIt.ttf</file>
+    <file>fonts/sourceserif/SourceSerif4-It.ttf</file>
+    <file>fonts/sourceserif/SourceSerif4-Regular.ttf</file>
     <file>icons/application-pdf.svg</file>
     <file>icons/checkbox.svg</file>
     <file>icons/code-context.svg</file>

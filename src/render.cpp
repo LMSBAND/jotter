@@ -17,6 +17,9 @@
 #include <QStandardPaths>
 #include <QTextCodec>
 #include <hunspell.h>
+#ifdef Q_OS_WIN
+#include <qt_windows.h>
+#endif
 #include <functional>
 
 namespace jot {
@@ -38,7 +41,8 @@ KSH::Definition syntaxFor(const QString &lang)
         {"sh", "Bash"}, {"shell", "Bash"}, {"zsh", "Zsh"}, {"js", "JavaScript"}, {"node", "JavaScript"},
         {"ts", "TypeScript"}, {"py", "Python"}, {"python3", "Python"}, {"ipython", "Python"}, {"c++", "C++"},
         {"cpp", "C++"}, {"h", "C"}, {"lean4", "Lean"}, {"graphviz", "dot"}, {"yml", "YAML"}, {"md", "Markdown"},
-        {"tex", "LaTeX"}, {"rb", "Ruby"}, {"rs", "Rust"}, {"jsfx", "JavaScript"}, {"eel", "JavaScript"}};
+        {"tex", "LaTeX"}, {"rb", "Ruby"}, {"rs", "Rust"}, {"jsfx", "JavaScript"}, {"eel", "JavaScript"},
+        {"batch", "MS-DOS Batch"}, {"pwsh", "PowerShell"}};
     const QString key = lang.toLower();
     auto it = cache.constFind(key);
     if (it != cache.constEnd())
@@ -132,7 +136,7 @@ void Renderer::setTheme(const Theme &theme)
 
     for (int level = 1; level <= 6; ++level) {
         QTextCharFormat f;
-        f.setFontPointSize(th.pt() * Theme::headingScale(level));
+        f.setFontPointSize(th.bodyPt() * Theme::headingScale(level));
         f.setFontWeight(level <= 2 ? QFont::Bold : QFont::DemiBold);
         m_heading[level] = f;
     }
@@ -266,7 +270,8 @@ namespace {
 // A dictionary for the system language: one shipped beside Jotter, or the system's.
 bool findDictionary(QString *aff, QString *dic)
 {
-    const QStringList dirs = {QDir::cleanPath(QCoreApplication::applicationDirPath() + "/../share/hunspell"),
+    const QString app = QCoreApplication::applicationDirPath();
+    const QStringList dirs = {app + "/share/hunspell", QDir::cleanPath(app + "/../share/hunspell"),
                               "/usr/share/hunspell", "/usr/share/myspell/dicts", "/usr/share/myspell"};
     const QString locale = QLocale::system().name();
     for (const QString &name : {locale, locale.section('_', 0, 0), QStringLiteral("en_US"), QStringLiteral("en_GB")}) {
@@ -279,6 +284,22 @@ bool findDictionary(QString *aff, QString *dic)
         }
     }
     return false;
+}
+
+// Hunspell opens its files by narrow name.
+QByteArray narrowName(const QString &path)
+{
+    const QByteArray name = QFile::encodeName(path);
+#ifdef Q_OS_WIN
+    // A folder the system code page cannot spell still has a short (8.3) name.
+    if (QFile::decodeName(name) != path) {
+        wchar_t buffer[MAX_PATH];
+        const DWORD n = GetShortPathNameW(reinterpret_cast<const wchar_t *>(QDir::toNativeSeparators(path).utf16()), buffer, MAX_PATH);
+        if (n > 0 && n < MAX_PATH)
+            return QFile::encodeName(QString::fromWCharArray(buffer, int(n)));
+    }
+#endif
+    return name;
 }
 
 QString personalWords()     // words the user chose "Add to Dictionary" for
@@ -300,7 +321,7 @@ void Renderer::setSpellCheck(bool on)
     } else {
         QString aff, dic;
         if (findDictionary(&aff, &dic)) {
-            m_dict = Hunspell_create(QFile::encodeName(aff).constData(), QFile::encodeName(dic).constData());
+            m_dict = Hunspell_create(narrowName(aff).constData(), narrowName(dic).constData());
             m_codec = QTextCodec::codecForName(Hunspell_get_dic_encoding(m_dict));
             if (!m_codec)
                 m_codec = QTextCodec::codecForName("UTF-8");

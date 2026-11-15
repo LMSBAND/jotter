@@ -34,6 +34,22 @@ renderer that handles ordinary formulas but not matrices or `aligned`. If the
 machine's own `python3` already has numpy and matplotlib, cells use that one
 (and so see the other packages installed there) instead of the shipped one.
 
+## Windows
+
+```
+packaging/windows.sh        # needs Docker; writes dist/Jotter-Setup-x86_64.exe
+```
+
+An installer for 64-bit Windows 10 and 11, cross-compiled with MinGW in an
+Ubuntu container, so no Windows machine is involved in making it. It installs
+into the user's own programs folder without asking for administrator rights,
+adds a Start menu entry and an uninstaller, and carries Qt, a Python with
+numpy, matplotlib and pip, and an English dictionary. Differences from Linux:
+PDF export is printed by Edge (or Chrome) without showing a window, the shell
+cells are `powershell` and `batch`, and matrices in formulas need a LaTeX with
+`pdflatex` and `pdftocairo` on the PATH. The installer is not signed, so
+Windows asks before running it ("More info", then "Run anyway").
+
 ## Using it
 
 Type. Markdown habits work as you go: `# ` heading, `- ` list, `1. ` numbered,
@@ -60,6 +76,13 @@ variables carry over, plots appear under the cell. Click a cell's language tag
 to change it; click the triangle to run. Paste or drop pictures straight in and
 drag a corner to resize. Tab walks table cells.
 
+The font box in the toolbar (or Format > Font) sets the whole document in one of
+a few faces that are part of Jotter: Roboto, Atkinson Hyperlegible, EB Garamond,
+Source Serif, Computer Modern (the LaTeX look: text and formulas then match),
+Courier Prime and Comic Relief. The choice is saved in the document and goes
+into the PDF or HTML exported from it, on any machine. A new document starts in
+the face picked last.
+
 An existing `.md` opens as a document (File > Open, or `jotter file.md`). To pull
 one into the document you are in: File > Import, or drop the file on the page
 (dropped on an empty window, it opens instead).
@@ -84,6 +107,8 @@ plt.plot(x, y)
 -->
 
 $e^{i\pi} = -1$           math, inline or $$display$$
+
+<!--font: EB Garamond-->  the font the document is set in (last line; none for the default)
 ````
 
 Opening a document never runs anything; outputs are stored in the file.
@@ -102,5 +127,6 @@ Opening a document never runs anything; outputs are stored in the file.
 | `src/mathtex.*`, `data/mathtext_worker.py` | formulas to images: LaTeX, or matplotlib where there is none |
 | `src/exporter.*`, `src/pdfhelper.cpp` | HTML and PDF export |
 | `src/mainwindow.*` | window, menus, files, crash recovery |
-| `packaging/` | the AppImage build |
+| `packaging/` | the AppImage build, and the Windows installer (`packaging/windows/`) |
 | `data/icons/` | Breeze icons (LGPL), used where the desktop's theme lacks one |
+| `data/fonts/` | the text faces, built into the program; each folder has its licence (SIL Open Font License) |

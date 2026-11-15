@@ -18,6 +18,8 @@
 //
 //     $e^{i\pi} = -1$              math, inline or $$display$$
 //
+//     <!--font: EB Garamond-->     the face the document is set in (last line; none for the default)
+//
 // Reading goes through md4c (CommonMark + tables, strikethrough, task lists,
 // math), so any Markdown opens. Writing checks itself: every paragraph is parsed
 // back and compared, and if the pretty form would not round-trip it is written
@@ -116,6 +118,7 @@ public:
     void insertRuns(const Runs &runs);
     QTextCursor cursor() const { return m_c; }
     QString baseDir;            // where relative picture paths in the text are relative to (importing a file)
+    QString face;               // the text face the Markdown asked for, if it did (see loadMarkdown)
 
 private:
     void begin(const QTextBlockFormat &fmt);
@@ -138,7 +141,10 @@ private:
     int m_quote = 0;
 };
 
-// Replace the document's content with Markdown. Returns the front matter.
+// The line that records a document's text face ("" for the default one, which needs none).
+QString faceComment(const QString &face);
+
+// Replace the document's content (and its text face) with Markdown's. Returns the front matter.
 QString loadMarkdown(QTextDocument *doc, const QString &text, AssetStore *store = nullptr, bool importImages = false);
 
 }  // namespace jot

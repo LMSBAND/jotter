@@ -119,7 +119,7 @@ void FigureHandler::drawObject(QPainter *painter, const QRectF &rect, QTextDocum
     if (img.isNull()) {
         painter->setPen(QPen(th.muted, 1, Qt::DashLine));
         painter->drawRoundedRect(rect.adjusted(0.5, 0.5, -0.5, -0.5), 4, 4);
-        const QFont f = th.bodyFont(0.85);
+        const QFont f = th.uiFont(0.85);
         painter->setFont(f);
         QString name = src;
         name.remove("asset:");
@@ -203,7 +203,7 @@ void MathHandler::drawObject(QPainter *painter, const QRectF &rect, QTextDocumen
 
 QFont FoldHandler::font() const
 {
-    return ed->theme.bodyFont(0.82);
+    return ed->theme.uiFont(0.82);
 }
 
 QString FoldHandler::label(const QTextFormat &format) const

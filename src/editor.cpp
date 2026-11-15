@@ -102,6 +102,10 @@ Editor::~Editor()
 
 void Editor::applyTheme()
 {
+    const QString name = faceOf(document());
+    const Face &face = faceNamed(name);
+    theme.setFace(face);
+    m_face = face.name;
     QPalette pal = palette();
     pal.setColor(QPalette::Window, theme.canvas);
     pal.setColor(QPalette::Base, theme.paper);
@@ -117,6 +121,41 @@ void Editor::applyTheme()
     m_mathImages.clear();
     layoutPage();
     viewport()->update();
+}
+
+// The document says which face it is set in; the theme has to agree. True if it
+// did not (a document was loaded, or a change of face was undone).
+bool Editor::followFace()
+{
+    const QString name = faceOf(document());
+    const Face &face = faceNamed(name);
+    if (face.name == m_face)
+        return false;
+    theme.setFace(face);
+    m_face = face.name;
+    return true;
+}
+
+void Editor::setFace(const QString &name)
+{
+    QTextDocument *doc = document();
+    const Face &face = faceNamed(name);
+    const QString record = face.builtIn() ? face.name : QString();
+    if (faceOf(doc) == record)
+        return;
+    // One step for Undo: the face, and the line heights that go with it.
+    m_normalizing = true;
+    QTextCursor cur(doc);
+    cur.beginEditBlock();
+    jot::setFace(doc, record);
+    followFace();
+    normalize(doc, doc->firstBlock(), doc->lastBlock(), theme.layoutEm(), theme.leading);
+    cur.endEditBlock();
+    m_normalizing = false;
+    m_dirtyFrom = m_dirtyTo = -1;
+    applyTheme();
+    ensureCursorVisible();
+    emit faceChanged();
 }
 
 // The viewport is the sheet of paper; the margins around it show the canvas.
@@ -232,12 +271,17 @@ void Editor::loadMarkdown(const QString &text, const QString &path, bool importI
     m_normalizing = true;
     doc->setUndoRedoEnabled(false);
     frontMatter = jot::loadMarkdown(doc, text, &m_store, importImages);
-    normalize(doc, doc->firstBlock(), doc->lastBlock(), theme.layoutEm());
+    const bool refaced = followFace();
+    normalize(doc, doc->firstBlock(), doc->lastBlock(), theme.layoutEm(), theme.leading);
     doc->setUndoRedoEnabled(true);
     doc->setModified(false);
     m_normalizing = false;
     m_dirtyFrom = m_dirtyTo = -1;
     m_objects.clear();
+    if (refaced) {
+        applyTheme();
+        emit faceChanged();
+    }
     QSet<QString> refs;
     toMarkdown(false, &refs);
     m_store.savedRefs = refs;
@@ -336,7 +380,7 @@ void Editor::onContentsChanged()
 void Editor::normalizeRange(const QTextBlock &first, const QTextBlock &last, bool join)
 {
     QTextDocument *doc = document();
-    if (!needsNormalize(doc, first, last, theme.layoutEm()))
+    if (!needsNormalize(doc, first, last, theme.layoutEm(), theme.leading))
         return;
     const QTextCursor user = textCursor();
     const int pos = user.position(), anchor = user.anchor();
@@ -346,7 +390,7 @@ void Editor::normalizeRange(const QTextBlock &first, const QTextBlock &last, boo
         cur.joinPreviousEditBlock();
     else
         cur.beginEditBlock();
-    normalize(doc, first, last, theme.layoutEm());
+    normalize(doc, first, last, theme.layoutEm(), theme.leading);
     cur.endEditBlock();
     m_normalizing = false;
     QTextCursor now = textCursor();     // appending the trailing paragraph must not drag the cursor along
@@ -364,6 +408,8 @@ void Editor::normalizeRange(const QTextBlock &first, const QTextBlock &last, boo
 void Editor::replay(bool undo)
 {
     QTextDocument *doc = document();
+    const QTextCursor before = textCursor();
+    bool refaced = false;
     m_replaying = true;
     for (int i = 0; i < 8 && (undo ? doc->isUndoAvailable() : doc->isRedoAvailable()); ++i) {
         m_dirtyFrom = m_dirtyTo = -1;
@@ -371,15 +417,22 @@ void Editor::replay(bool undo)
             QTextEdit::undo();
         else
             QTextEdit::redo();
+        refaced = followFace() || refaced;      // a change of face went, or came back: spacing is judged by the one now in force
         if (m_dirtyFrom < 0)
             break;
         QTextBlock first, last;
         dirtyBlocks(&first, &last);
-        if (!needsNormalize(doc, first, last, theme.layoutEm()))
+        if (!needsNormalize(doc, first, last, theme.layoutEm(), theme.leading))
             break;
     }
     m_dirtyFrom = m_dirtyTo = -1;
     m_replaying = false;
+    if (refaced) {
+        applyTheme();
+        setTextCursor(before);      // (Qt leaves the cursor where the last change was, and this one was everywhere)
+        ensureCursorVisible();
+        emit faceChanged();
+    }
     viewport()->update();
 }
 
@@ -1209,7 +1262,7 @@ QRectF Editor::bandRect(const QTextBlock &first, const QTextBlock &last) const
 void Editor::tagRects(const QTextBlock &head, QRectF *play, QRectF *label) const
 {
     const QRectF band = bandRect(head, runLast(head));
-    const QFontMetricsF fm(theme.bodyFont(0.78));
+    const QFontMetricsF fm(theme.uiFont(0.78));
     const QString state = cellState(head);
     QString text = langName(langOf(head));
     if (text.isEmpty())
@@ -1297,7 +1350,7 @@ void Editor::paintUnder(QPainter &p, const QRectF &clip, int firstVisibleY)
                 if (!state.isEmpty())
                     text = state + QString::fromUtf8("\xE2\x80\xA6");
                 p.fillRect(play.united(label).adjusted(-4, 0, 0, 0), theme.codeBg);     // keep long first lines legible
-                p.setFont(theme.bodyFont(0.78));
+                p.setFont(theme.uiFont(0.78));
                 p.setPen(state.isEmpty() ? theme.muted : theme.accent);
                 p.drawText(label, Qt::AlignCenter, text);
                 p.setPen(Qt::NoPen);

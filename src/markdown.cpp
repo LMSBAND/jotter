@@ -1,6 +1,7 @@
 #include "markdown.h"
 
 #include "assets.h"
+#include "theme.h"
 
 #include <QDir>
 #include <QHash>
@@ -1249,6 +1250,9 @@ QString MarkdownWriter::text()
             ++i;
         }
     }
+    const QString face = faceComment(faceOf(m_doc));
+    if (!face.isEmpty())
+        add(face);
     QString body = chunks.join("\n\n");
     if (!m_front.isEmpty()) {
         QString f = m_front;
@@ -1424,8 +1428,14 @@ void MarkdownReader::html(const QString &content)
     static const RE cell(QStringLiteral(R"(^<!--\s*cell\b[ \t]*([^\n]*)\n(.*?)\n?-->\s*$)"), RE::DotMatchesEverythingOption);
     static const RE img(QStringLiteral(R"(^<img\b([^>]*?)/?>\s*$)"),
                         RE::DotMatchesEverythingOption | RE::CaseInsensitiveOption);
+    static const RE font(QStringLiteral(R"(^<!--\s*font:([^\n]*?)-->$)"));
     const QString s = content.trimmed();
-    auto m = cell.match(s);
+    auto m = font.match(s);
+    if (m.hasMatch() && faceNamed(m.captured(1)).builtIn()) {
+        face = faceNamed(m.captured(1)).name;       // not content: how all of it looks
+        return;
+    }
+    m = cell.match(s);
     if (m.hasMatch()) {
         begin(blockFmt(Fold));
         m_c.insertText(QString(QChar::ObjectReplacementCharacter), foldFmt(m.captured(1).trimmed(), m.captured(2)));
@@ -1493,6 +1503,12 @@ void MarkdownReader::blocks(const QVector<MdBlock> &list)
     }
 }
 
+QString faceComment(const QString &face)
+{
+    const Face &known = faceNamed(face);
+    return known.builtIn() ? "<!--font: " + known.name + "-->" : QString();
+}
+
 QString loadMarkdown(QTextDocument *doc, const QString &text, AssetStore *store, bool importImages)
 {
     QString normal = text, body;
@@ -1500,7 +1516,9 @@ QString loadMarkdown(QTextDocument *doc, const QString &text, AssetStore *store,
     doc->clear();
     QTextCursor cursor(doc);
     cursor.setBlockFormat(QTextBlockFormat());
-    MarkdownReader(cursor, store, importImages).read(body);
+    MarkdownReader reader(cursor, store, importImages);
+    reader.read(body);
+    setFace(doc, reader.face);
     return front;
 }
 

@@ -36,9 +36,18 @@ target_include_directories(jottercore PUBLIC src)
 target_compile_options(jottercore PRIVATE -Wall -Wextra)
 target_compile_definitions(jottercore PUBLIC JOTTER_VERSION="${PROJECT_VERSION}" QT_NO_CAST_FROM_BYTEARRAY)
 target_link_libraries(jottercore PUBLIC Qt5::Widgets KF5::SyntaxHighlighting PkgConfig::MD4C PkgConfig::HUNSPELL)
+if(WIN32)
+  target_compile_definitions(jottercore PUBLIC _WIN32_WINNT=0x0601)   # the Windows API as of Windows 7
+endif()
 
 add_executable(jotter src/main.cpp)
 target_link_libraries(jotter PRIVATE jottercore)
+if(WIN32)
+  # A program with an icon and no console window.
+  target_sources(jotter PRIVATE packaging/windows/jotter.rc)
+  target_include_directories(jotter PRIVATE packaging/windows)
+  set_target_properties(jotter PROPERTIES WIN32_EXECUTABLE ON)
+endif()
 
 # PDF export runs in its own small process so the editor never loads a browser engine.
 if(Qt5WebEngineWidgets_FOUND)
@@ -53,5 +62,10 @@ if(Qt5Test_FOUND)
 endif()
 
 install(TARGETS jotter RUNTIME DESTINATION bin)
-install(FILES data/jotter.desktop DESTINATION share/applications)
-install(FILES data/jotter.svg DESTINATION share/icons/hicolor/scalable/apps)
+if(UNIX)
+  install(FILES data/jotter.desktop DESTINATION share/applications)
+  install(FILES data/jotter.svg DESTINATION share/icons/hicolor/scalable/apps)
+  # The text faces are inside the program; their licences go along with it.
+  install(DIRECTORY data/fonts/ DESTINATION share/licenses/jotter/fonts
+          FILES_MATCHING PATTERN "OFL.txt" PATTERN "LICENSE.md")
+endif()

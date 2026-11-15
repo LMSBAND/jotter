@@ -30,6 +30,7 @@ enum Prop {
     PDisplay,                               // math: display (centred, own line) rather than inline
     PCode,                                  // fold object: the hidden cell's source
     PRaw,                                   // inline text written back to Markdown verbatim (unknown HTML)
+    PFace = QTextFormat::UserProperty + 30, // the document (its root frame): the text face it is set in, by name
 };
 
 enum Kind { Para, Code, Output, Raw, Fold, Rule, Quote, Heading };
@@ -51,6 +52,11 @@ bool objectFormat(const QTextBlock &block, int objectType, QTextCharFormat *out 
 bool hasFigure(const QTextBlock &block);
 bool loneObject(const QTextBlock &block, QTextCharFormat *out);   // the block is exactly one inline object
 Styles stylesOf(const QTextCharFormat &format, QString *href = nullptr);
+
+// The face the document's text is set in ("" = the system's own). It is kept
+// in the document so that changing it is an edit like any other: it can be undone.
+QString faceOf(const QTextDocument *doc);
+void setFace(QTextDocument *doc, const QString &name);
 
 // ---- making formats -------------------------------------------------------
 QTextBlockFormat blockFmt(Kind kind = Para, int level = 0, const QString &lang = QString(), bool err = false);
@@ -84,7 +90,9 @@ QVector<QTextBlock> cellHeads(const QTextDocument *doc);
 constexpr qreal PadV = 0.55;    // em of code-band padding above/below the text
 constexpr qreal PadH = 0.9;     // em of code-band padding left/right
 
-bool needsNormalize(const QTextDocument *doc, QTextBlock first, QTextBlock last, qreal em);
-bool normalize(QTextDocument *doc, QTextBlock first, QTextBlock last, qreal em);
+// (em: the body type size in px. leading: what the text face's own line height
+// is to be multiplied by, see Theme::setFace.)
+bool needsNormalize(const QTextDocument *doc, QTextBlock first, QTextBlock last, qreal em, qreal leading);
+bool normalize(QTextDocument *doc, QTextBlock first, QTextBlock last, qreal em, qreal leading);
 
 }  // namespace jot

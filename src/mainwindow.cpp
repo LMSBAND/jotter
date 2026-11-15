@@ -2,8 +2,11 @@
 
 #include "editor.h"
 #include "exporter.h"
+#include "markdown.h"
 #include "render.h"
 
+#include <QAbstractItemView>
+#include <QActionGroup>
 #include <QApplication>
 #include <QCloseEvent>
 #include <QComboBox>
@@ -12,7 +15,7 @@
 #include <QDialogButtonBox>
 #include <QDir>
 #include <QFileDialog>
-#include <QFontDialog>
+#include <QFontInfo>
 #include <QFormLayout>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -28,11 +31,15 @@
 #include <QSpinBox>
 #include <QStandardPaths>
 #include <QStatusBar>
-#include <QTemporaryFile>
+#include <QStylePainter>
+#include <QStyleOptionComboBox>
 #include <QToolBar>
 #include <QToolButton>
 #include <QUrl>
 #include <QVBoxLayout>
+#ifdef Q_OS_WIN
+#include <qt_windows.h>
+#endif
 
 namespace jot {
 
@@ -53,6 +60,61 @@ QString recoveryDir()
     return dir;
 }
 
+// The font box in the toolbar. Its list shows each face in its own letters,
+// which takes having them all loaded: that waits until the list is opened.
+class FaceBox : public QComboBox
+{
+public:
+    explicit FaceBox(QWidget *parent) : QComboBox(parent)
+    {
+        for (const Face &face : faces())
+            addItem(face.name);
+        setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+        setMinimumContentsLength(11);       // leaves room on the toolbar: a longer name is shortened (see paintEvent)
+    }
+    void showPopup() override
+    {
+        if (!itemData(0, Qt::FontRole).isValid()) {
+            for (int i = 0; i < count(); ++i)
+                setItemData(i, fontOf(faceNamed(itemText(i)), QFontInfo(font()).pointSizeF()), Qt::FontRole);
+            view()->setMinimumWidth(view()->sizeHintForColumn(0) + 28);
+        }
+        QComboBox::showPopup();
+    }
+
+protected:
+    void paintEvent(QPaintEvent *) override     // as QComboBox paints itself, but a name too long for the box ends in "..."
+    {
+        QStylePainter painter(this);
+        painter.setPen(palette().color(QPalette::Text));
+        QStyleOptionComboBox option;
+        initStyleOption(&option);
+        const QRect field = style()->subControlRect(QStyle::CC_ComboBox, &option, QStyle::SC_ComboBoxEditField, this);
+        option.currentText = fontMetrics().elidedText(option.currentText, Qt::ElideRight, field.width() - 2);
+        painter.drawComplexControl(QStyle::CC_ComboBox, option);
+        painter.drawControl(QStyle::CE_ComboBoxLabel, option);
+    }
+};
+
+// Is the process with this id a Jotter that is still running?
+bool jotterRuns(const QString &pid)
+{
+#ifdef Q_OS_WIN
+    bool runs = false;
+    if (const HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid.toULong())) {
+        wchar_t name[MAX_PATH];
+        DWORD size = MAX_PATH, code = 0;
+        runs = GetExitCodeProcess(process, &code) && code == STILL_ACTIVE && QueryFullProcessImageNameW(process, 0, name, &size)
+            && QFileInfo(QString::fromWCharArray(name, int(size))).completeBaseName().compare("jotter", Qt::CaseInsensitive) == 0;
+        CloseHandle(process);
+    }
+    return runs;
+#else
+    QFile comm("/proc/" + pid + "/comm");
+    return comm.open(QIODevice::ReadOnly) && comm.readAll().trimmed() == "jotter";
+#endif
+}
+
 }  // namespace
 
 MainWindow::MainWindow()
@@ -60,6 +122,8 @@ MainWindow::MainWindow()
     m_editor = new Editor(this);
     buildUi();
     applySettings();
+    if (!blank().isEmpty())
+        m_editor->loadMarkdown(blank());
     restoreGeometry(m_settings.value("geometry").toByteArray());
     if (!m_settings.contains("geometry"))
         resize(1100, 900);
@@ -68,6 +132,7 @@ MainWindow::MainWindow()
     connect(m_editor, &QTextEdit::cursorPositionChanged, this, &MainWindow::updateState);
     connect(m_editor, &QTextEdit::currentCharFormatChanged, this, &MainWindow::updateState);
     connect(m_editor, &Editor::cellsChanged, this, &MainWindow::updateState);
+    connect(m_editor, &Editor::faceChanged, this, &MainWindow::updateFace);
     connect(m_editor, &Editor::status, this, [this](const QString &m) { statusBar()->showMessage(m, 6000); });
     connect(m_editor, &Editor::zoomRequested, this, &MainWindow::zoomBy);
     connect(m_editor, &Editor::filesDropped, this, &MainWindow::dropped);
@@ -82,6 +147,7 @@ MainWindow::MainWindow()
 
     updateTitle();
     updateState();
+    updateFace();
     updateWords();
     m_editor->setFocus();
 }
@@ -194,6 +260,19 @@ void MainWindow::buildUi()
     add(insert, tr("Paragraph &Below"), QString(), QKeySequence(Qt::ALT + Qt::Key_Return), [ed] { ed->paragraphBelow(); });
 
     QMenu *format = menuBar()->addMenu(tr("F&ormat"));
+    m_faces = format->addMenu(icon("preferences-desktop-font"), tr("&Font"));
+    auto *faceGroup = new QActionGroup(this);
+    for (const Face &face : faces()) {
+        QAction *a = add(m_faces, face.name, QString(), QKeySequence(), [this, name = face.name] { pickFace(name); });
+        a->setData(face.name);
+        a->setCheckable(true);
+        faceGroup->addAction(a);
+    }
+    connect(m_faces, &QMenu::aboutToShow, this, [this] {        // each in its own letters, as in the toolbar's list
+        for (QAction *a : m_faces->actions())
+            a->setFont(fontOf(faceNamed(a->data().toString()), QFontInfo(m_faces->font()).pointSizeF()));
+    });
+    format->addSeparator();
     add(format, tr("Body &Text"), QString(), QKeySequence(Qt::CTRL + Qt::ALT + Qt::Key_0), [ed] { ed->setBlockKind(Para); });
     for (int level = 1; level <= 3; ++level)
         add(format, tr("Heading &%1").arg(level), QString(), QKeySequence(Qt::CTRL + Qt::ALT + (Qt::Key_0 + level)),
@@ -241,7 +320,6 @@ void MainWindow::buildUi()
         applySettings();
     });
     m_spell->setCheckable(true);
-    add(view, tr("Text &Font…"), "preferences-desktop-font", QKeySequence(), [this] { chooseFont(); });
     view->addSeparator();
     add(view, tr("Zoom &In"), "zoom-in", QKeySequence(), [this] { zoomBy(1); })
         ->setShortcuts({QKeySequence(Qt::CTRL + Qt::Key_Equal), QKeySequence(Qt::CTRL + Qt::Key_Plus)});
@@ -275,6 +353,11 @@ void MainWindow::buildUi()
         m_editor->setFocus();
     });
     bar->addWidget(m_style);
+    m_face = new FaceBox(bar);
+    m_face->setToolTip(tr("Font of the whole document"));
+    m_face->setFocusPolicy(Qt::NoFocus);
+    connect(m_face, QOverload<int>::of(&QComboBox::activated), this, [this](int i) { pickFace(m_face->itemText(i)); });
+    bar->addWidget(m_face);
     bar->addSeparator();
     bar->addActions({m_bold, m_italic, m_underline, m_strike, m_code});
     bar->addSeparator();
@@ -302,9 +385,6 @@ void MainWindow::applySettings()
     Theme th(m_settings.contains("dark") ? m_settings.value("dark").toBool() : Theme::systemIsDark());
     th.zoom = qBound(0.6, m_settings.value("zoom", 1.0).toDouble(), 2.5);
     th.size = qBound(8.0, m_settings.value("fontSize", 11.0).toDouble(), 24.0);
-    const QString family = m_settings.value("font").toString();
-    if (!family.isEmpty())
-        th.body = family;
     m_editor->theme = th;
     m_editor->applyTheme();
     m_editor->renderer()->setSpellCheck(m_settings.value("spell", true).toBool());
@@ -377,7 +457,7 @@ void MainWindow::newWindow()
 
 void MainWindow::open(const QString &path)
 {
-    QString text;
+    QString text = blank();
     QFile file(path);
     if (file.exists()) {
         if (!file.open(QIODevice::ReadOnly)) {
@@ -555,12 +635,10 @@ void MainWindow::exportHtml()
 
 void MainWindow::exportPdf()
 {
-    QString helper = QCoreApplication::applicationDirPath() + "/jotter-pdf";
-    if (!QFile::exists(helper))
-        helper = QStandardPaths::findExecutable("jotter-pdf");
-    if (helper.isEmpty()) {
-        QMessageBox::information(this, tr("Jotter"), tr("PDF export uses the jotter-pdf helper, which was not found next to Jotter. "
-                                                        "It is built when the Qt WebEngine development package is installed."));
+    if (!canExportPdf()) {
+        QMessageBox::information(this, tr("Jotter"), tr("PDF export needs either the jotter-pdf helper next to Jotter (it is built "
+                                                        "when the Qt WebEngine development package is installed), or Chrome, "
+                                                        "Chromium or Edge."));
         return;
     }
     const QString base = m_path.isEmpty() ? QDir::homePath() + "/" + documentTitle() : QFileInfo(m_path).absolutePath() + "/" + QFileInfo(m_path).completeBaseName();
@@ -569,21 +647,11 @@ void MainWindow::exportPdf()
         return;
     if (QFileInfo(path).suffix().isEmpty())
         path += ".pdf";
-    auto *html = new QTemporaryFile(QDir::tempPath() + "/jotter-XXXXXX.html", this);
-    if (!html->open())
-        return;
-    html->write(pageHtml(m_editor->document(), m_editor->store(), documentTitle()).toUtf8());
-    html->close();
-    auto *proc = new QProcess(this);
-    connect(proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this, [this, proc, html, path](int code, QProcess::ExitStatus status) {
-        const bool ok = status == QProcess::NormalExit && code == 0 && QFile::exists(path);
-        statusBar()->showMessage(ok ? tr("Exported %1").arg(path) : tr("PDF export failed"), 8000);
-        html->deleteLater();
-        proc->deleteLater();
-    });
     const QString paper = QLocale().measurementSystem() == QLocale::MetricSystem ? "a4" : "letter";
-    proc->start(helper, {html->fileName(), path, paper});
     statusBar()->showMessage(tr("Exporting PDF…"));
+    jot::exportPdf(m_editor->document(), m_editor->store(), documentTitle(), path, paper, this, [this, path](bool ok) {
+        statusBar()->showMessage(ok ? tr("Exported %1").arg(path) : tr("PDF export failed"), 8000);
+    });
 }
 
 // ---- find ---------------------------------------------------------------------
@@ -654,21 +722,27 @@ void MainWindow::zoomBy(int steps)
     statusBar()->showMessage(tr("Zoom %1%").arg(qRound(zoom * 100)), 1500);
 }
 
-void MainWindow::chooseFont()
+// The text face belongs to the document (it is saved in it). A new document
+// starts in the one that was picked last.
+void MainWindow::pickFace(const QString &name)
 {
-    bool ok = false;
-    QFont current(m_editor->theme.body);
-    current.setPointSizeF(m_editor->theme.size);
-    const QFont font = QFontDialog::getFont(&ok, current, this, tr("Text Font"));
-    if (!ok)
-        return;
-    m_settings.setValue("font", font.family());
-    m_settings.setValue("fontSize", font.pointSizeF());
-    applySettings();
-    // Spacing follows the font size and is kept in the document: lay it out afresh.
-    const bool modified = m_editor->document()->isModified();
-    m_editor->loadMarkdown(m_editor->toMarkdown(), m_path);
-    m_editor->document()->setModified(modified);
+    m_editor->setFace(name);
+    m_settings.setValue("font", m_editor->face());
+    updateFace();
+    m_editor->setFocus();
+}
+
+void MainWindow::updateFace()
+{
+    const QString name = m_editor->face();
+    m_face->setCurrentIndex(qMax(0, m_face->findText(name)));
+    for (QAction *a : m_faces->actions())
+        a->setChecked(a->data().toString() == name);
+}
+
+QString MainWindow::blank() const
+{
+    return faceComment(m_settings.value("font").toString());
 }
 
 void MainWindow::insertPicture()
@@ -750,9 +824,7 @@ void MainWindow::offerRecovery()
 {
     QFileInfoList leftovers;
     for (const QFileInfo &fi : QDir(recoveryDir()).entryInfoList({"untitled-*.md"}, QDir::Files, QDir::Time)) {
-        const QString pid = fi.completeBaseName().section('-', 1);
-        QFile comm("/proc/" + pid + "/comm");
-        if (comm.open(QIODevice::ReadOnly) && comm.readAll().trimmed() == "jotter")
+        if (jotterRuns(fi.completeBaseName().section('-', 1)))
             continue;       // that window is still open
         leftovers.append(fi);
     }

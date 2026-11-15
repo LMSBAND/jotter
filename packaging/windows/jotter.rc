@@ -1,0 +1,3 @@
+// The icon Windows shows for jotter.exe. jotter.ico is data/jotter.svg at
+// 16 to 256 pixels (rsvg-convert, then ImageMagick's convert).
+IDI_ICON1 ICON "jotter.ico"

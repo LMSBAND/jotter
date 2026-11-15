@@ -255,7 +255,7 @@ void MathRenderer::finishLatex()
 {
     // The log says, per formula, whether TeX complained and how big the box was.
     QFile logFile(m_dir->path() + "/batch.log");
-    const QString log = logFile.open(QIODevice::ReadOnly) ? QString::fromUtf8(logFile.readAll()) : QString();
+    const QString log = logFile.open(QIODevice::ReadOnly) ? QString::fromUtf8(logFile.readAll()).remove('\r') : QString();
     QStringList pages = QDir(m_dir->path()).entryList({"page-*.png"}, QDir::Files);
     std::sort(pages.begin(), pages.end(), [](const QString &a, const QString &b) {
         return a.mid(5).section('.', 0, 0).toInt() < b.mid(5).section('.', 0, 0).toInt();

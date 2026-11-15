@@ -99,6 +99,23 @@ Styles stylesOf(const QTextCharFormat &cf, QString *href)
     return s;
 }
 
+QString faceOf(const QTextDocument *doc)
+{
+    return doc->rootFrame()->frameFormat().stringProperty(PFace);
+}
+
+void setFace(QTextDocument *doc, const QString &name)
+{
+    QTextFrameFormat format = doc->rootFrame()->frameFormat();
+    if (format.stringProperty(PFace) == name)
+        return;
+    if (name.isEmpty())
+        format.clearProperty(PFace);
+    else
+        format.setProperty(PFace, name);
+    doc->rootFrame()->setFrameFormat(format);
+}
+
 // ---- making formats -------------------------------------------------------
 
 QTextBlockFormat blockFmt(Kind kind, int level, const QString &lang, bool err)
@@ -369,11 +386,11 @@ struct Layout {
     }
 };
 
-Layout wanted(const QTextBlock &block, qreal em)
+Layout wanted(const QTextBlock &block, qreal em, qreal leading)
 {
     Layout l;
     if (tableOf(block)) {
-        l.lineHeight = 125;
+        l.lineHeight = qRound(125 * leading);
         return l;
     }
     const Kind k = kindOf(block);
@@ -445,6 +462,8 @@ Layout wanted(const QTextBlock &block, qreal em)
         }
         break;
     }
+    if (k == Heading || k == Quote || k == Para)
+        l.lineHeight = qRound(l.lineHeight * leading);      // lines of the text face (the others are in the code font)
     if (hasFigure(block))
         l.lineHeight = 0;       // proportional spacing would scale with the picture's height
     QTextCharFormat only;
@@ -483,16 +502,16 @@ bool needsTail(const QTextDocument *doc)    // always keep a plain paragraph to 
 
 }  // namespace
 
-bool needsNormalize(const QTextDocument *doc, QTextBlock first, QTextBlock last, qreal em)
+bool needsNormalize(const QTextDocument *doc, QTextBlock first, QTextBlock last, qreal em, qreal leading)
 {
     const int stop = last.blockNumber();
     for (QTextBlock b = first; b.isValid() && b.blockNumber() <= stop; b = b.next())
-        if (emptyFold(b) || !(current(b) == wanted(b, em)))
+        if (emptyFold(b) || !(current(b) == wanted(b, em, leading)))
             return true;
     return needsTail(doc);
 }
 
-bool normalize(QTextDocument *doc, QTextBlock first, QTextBlock last, qreal em)
+bool normalize(QTextDocument *doc, QTextBlock first, QTextBlock last, qreal em, qreal leading)
 {
     QTextCursor cur(doc);
     bool changed = false;
@@ -504,7 +523,7 @@ bool normalize(QTextDocument *doc, QTextBlock first, QTextBlock last, qreal em)
             cur.setBlockFormat(f);
             changed = true;
         }
-        const Layout want = wanted(b, em);
+        const Layout want = wanted(b, em, leading);
         if (current(b) == want)
             return;
         QTextBlockFormat d;
