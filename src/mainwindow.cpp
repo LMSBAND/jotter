@@ -11,32 +11,44 @@
 #include <QCloseEvent>
 #include <QComboBox>
 #include <QCryptographicHash>
+#include <QDesktopServices>
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QDir>
+#include <QDockWidget>
 #include <QFileDialog>
 #include <QFontInfo>
 #include <QFormLayout>
 #include <QHBoxLayout>
+#include <QHeaderView>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QLabel>
 #include <QLineEdit>
 #include <QLocale>
 #include <QMenuBar>
 #include <QMessageBox>
+#include <QPlainTextEdit>
 #include <QProcess>
+#include <QProgressDialog>
 #include <QPushButton>
 #include <QRegularExpression>
 #include <QSaveFile>
+#include <QSet>
 #include <QShortcut>
 #include <QSpinBox>
 #include <QStandardPaths>
 #include <QStatusBar>
 #include <QStylePainter>
+#include <QTableWidget>
 #include <QStyleOptionComboBox>
 #include <QToolBar>
 #include <QToolButton>
+#include <QTreeWidget>
 #include <QUrl>
 #include <QVBoxLayout>
+#include <QVersionNumber>
+#include <cstdio>
 #ifdef Q_OS_WIN
 #include <qt_windows.h>
 #endif
@@ -95,6 +107,66 @@ protected:
         painter.drawControl(QStyle::CE_ComboBoxLabel, option);
     }
 };
+
+// A table or column name as SQL wants it: as typed if it is a plain word,
+// in double quotes if it has spaces in it or is one of SQL's own words.
+QString sqlName(const QString &name)
+{
+    static const QRegularExpression plain(QStringLiteral("^[A-Za-z_][A-Za-z0-9_]*$"));
+    static const QStringList words = QString::fromLatin1(
+        "abort action add after all alter always analyze and as asc attach autoincrement before begin between by cascade "
+        "case cast check collate column commit conflict constraint create cross current current_date current_time "
+        "current_timestamp database default deferrable deferred delete desc detach distinct do drop each else end escape "
+        "except exclude exclusive exists explain fail filter first following for foreign from full generated glob group "
+        "groups having if ignore immediate in index indexed initially inner insert instead intersect into is isnull join "
+        "key last left like limit match materialized natural no not nothing notnull null nulls of offset on or order "
+        "others outer over partition plan pragma preceding primary query raise range recursive references regexp reindex "
+        "release rename replace restrict returning right rollback row rows savepoint select set table temp temporary then "
+        "ties to transaction trigger unbounded union unique update using vacuum values view virtual when where window "
+        "with without").split(' ');
+    static const QSet<QString> reserved(words.begin(), words.end());
+    if (plain.match(name).hasMatch() && !reserved.contains(name.toLower()))
+        return name;
+    return '"' + QString(name).replace('"', "\"\"") + '"';
+}
+
+// Run the update helper (data/update_worker.py) while a box says what is going
+// on and offers to stop. False if it failed (*why says how) or was stopped
+// (*why is empty); otherwise *out is what it printed.
+bool runUpdater(QWidget *parent, const QString &python, const QStringList &args, const QString &label, bool percent,
+                QByteArray *out, QString *why)
+{
+    QProgressDialog progress(label, QObject::tr("Cancel"), 0, percent ? 100 : 0, parent);
+    progress.setWindowModality(Qt::WindowModal);
+    progress.setMinimumDuration(500);
+    progress.setValue(0);
+    QProcess p;
+    p.setProcessEnvironment(pythonEnvironment(python));
+    QEventLoop loop;
+    QObject::connect(&p, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), &loop, &QEventLoop::quit);
+    QObject::connect(&p, &QProcess::errorOccurred, &loop, &QEventLoop::quit);
+    QObject::connect(&progress, &QProgressDialog::canceled, &loop, &QEventLoop::quit);
+    QObject::connect(&p, &QProcess::readyReadStandardOutput, &progress, [&] {
+        out->append(p.readAllStandardOutput());
+        if (percent)
+            progress.setValue(qBound(0, out->trimmed().split('\n').last().trimmed().toInt(), 99));
+    });
+    p.start(python, QStringList{scriptPath("update_worker.py")} + args);
+    loop.exec();
+    why->clear();
+    if (progress.wasCanceled()) {
+        p.kill();
+        p.waitForFinished(3000);
+        return false;
+    }
+    progress.reset();
+    out->append(p.readAllStandardOutput());
+    if (p.error() == QProcess::FailedToStart)
+        *why = QObject::tr("Could not start Python (%1).").arg(python);
+    else if (p.exitStatus() != QProcess::NormalExit || p.exitCode() != 0)
+        *why = QString::fromUtf8(p.readAllStandardError()).trimmed().section('\n', -1);
+    return why->isEmpty();
+}
 
 // Is the process with this id a Jotter that is still running?
 bool jotterRuns(const QString &pid)
@@ -241,7 +313,7 @@ void MainWindow::buildUi()
     add(edit, tr("Cu&t"), "edit-cut", QKeySequence::Cut, [ed] { ed->cut(); });
     add(edit, tr("&Copy"), "edit-copy", QKeySequence::Copy, [ed] { ed->copy(); });
     add(edit, tr("&Paste"), "edit-paste", QKeySequence::Paste, [ed] { ed->paste(); });
-    add(edit, tr("Paste as Plain &Text"), QString(), QKeySequence(Qt::CTRL + Qt::SHIFT + Qt::Key_V), [ed] { ed->pastePlain(); });
+    add(edit, tr("Paste as P&lain Text"), QString(), QKeySequence(Qt::CTRL + Qt::SHIFT + Qt::Key_V), [ed] { ed->pastePlain(); });
     add(edit, tr("Paste &Markdown"), QString(), QKeySequence(Qt::CTRL + Qt::ALT + Qt::Key_V), [ed] { ed->pasteMarkdown(); });
     add(edit, tr("Select &All"), "edit-select-all", QKeySequence::SelectAll, [ed] { ed->selectAll(); });
     edit->addSeparator();
@@ -255,6 +327,7 @@ void MainWindow::buildUi()
     QAction *table = add(insert, tr("&Table…"), "insert-table", QKeySequence(), [this] { insertTable(); });
     QAction *formula = add(insert, tr("&Formula…"), "insert-math-expression", QKeySequence(Qt::CTRL + Qt::Key_M), [ed] { ed->editMath(); });
     QAction *link = add(insert, tr("&Link…"), "insert-link", QKeySequence(Qt::CTRL + Qt::Key_K), [ed] { ed->editLink(); });
+    add(insert, tr("&Database…"), "server-database", QKeySequence(), [this] { insertDatabase(); });
     add(insert, tr("Horizontal &Rule"), "insert-horizontal-rule", QKeySequence(), [ed] { ed->insertRule(); });
     insert->addSeparator();
     add(insert, tr("Paragraph &Below"), QString(), QKeySequence(Qt::ALT + Qt::Key_Return), [ed] { ed->paragraphBelow(); });
@@ -290,7 +363,7 @@ void MainWindow::buildUi()
     m_numbers = add(format, tr("&Numbered List"), "format-list-ordered", QKeySequence(Qt::CTRL + Qt::SHIFT + Qt::Key_7), [ed] { ed->toggleList(true); });
     m_checks = add(format, tr("Chec&klist"), "checkbox", QKeySequence(Qt::CTRL + Qt::SHIFT + Qt::Key_9), [ed] { ed->toggleList(false, true); });
     format->addSeparator();
-    add(format, tr("Clear &Formatting"), "edit-clear", QKeySequence(Qt::CTRL + Qt::Key_Backslash), [ed] { ed->clearFormatting(); });
+    add(format, tr("Clea&r Formatting"), "edit-clear", QKeySequence(Qt::CTRL + Qt::Key_Backslash), [ed] { ed->clearFormatting(); });
     for (QAction *a : {m_bold, m_italic, m_underline, m_strike, m_code, m_bullets, m_numbers, m_checks})
         a->setCheckable(true);
 
@@ -308,6 +381,8 @@ void MainWindow::buildUi()
     });
     add(cells, tr("&Clear Output"), QString(), QKeySequence(), [ed] { ed->clearOutputs(false); });
     add(cells, tr("Clear All &Outputs"), QString(), QKeySequence(), [ed] { ed->clearOutputs(true); });
+    cells->addSeparator();
+    add(cells, tr("Environment &Variables…"), QString(), QKeySequence(), [this] { editEnvironment(); });
 
     QMenu *view = menuBar()->addMenu(tr("&View"));
     m_dark = add(view, tr("&Dark Paper"), QString(), QKeySequence(), [this](bool on) {
@@ -320,11 +395,15 @@ void MainWindow::buildUi()
         applySettings();
     });
     m_spell->setCheckable(true);
+    QAction *shortcuts = view->addAction(QString());        // the list down the left side (set up below)
     view->addSeparator();
     add(view, tr("Zoom &In"), "zoom-in", QKeySequence(), [this] { zoomBy(1); })
         ->setShortcuts({QKeySequence(Qt::CTRL + Qt::Key_Equal), QKeySequence(Qt::CTRL + Qt::Key_Plus)});
     add(view, tr("Zoom &Out"), "zoom-out", QKeySequence(Qt::CTRL + Qt::Key_Minus), [this] { zoomBy(-1); });
     add(view, tr("&Actual Size"), "zoom-original", QKeySequence(Qt::CTRL + Qt::Key_0), [this] { zoomBy(0); });
+
+    QMenu *help = menuBar()->addMenu(tr("&Help"));
+    add(help, tr("Check for &Updates…"), QString(), QKeySequence(), [this] { checkForUpdates(); });
 
     // Editing shortcuts belong to the page: Shift+Enter in the find box must not run a cell.
     for (QMenu *menu : {insert, format, cells}) {
@@ -371,6 +450,52 @@ void MainWindow::buildUi()
     if (auto *button = qobject_cast<QToolButton *>(bar->widgetForAction(m_hideAll)))
         button->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);      // this one says what it does
 
+    // shortcuts: every menu entry that has a key, listed down the left side
+    m_shortcuts = new QDockWidget(tr("Shortcuts"), this);
+    m_shortcuts->setObjectName("shortcuts");
+    m_shortcuts->setFeatures(QDockWidget::DockWidgetClosable);
+    m_shortcuts->setAllowedAreas(Qt::LeftDockWidgetArea);
+    auto *list = new QTreeWidget(m_shortcuts);
+    list->setColumnCount(2);
+    list->setHeaderHidden(true);
+    list->setRootIsDecorated(false);
+    list->setItemsExpandable(false);
+    list->setIndentation(10);
+    list->setFrameShape(QFrame::NoFrame);
+    list->setFocusPolicy(Qt::NoFocus);      // the keys stay with the page
+    list->setSelectionMode(QAbstractItemView::NoSelection);
+    list->header()->setStretchLastSection(false);
+    list->header()->setSectionResizeMode(0, QHeaderView::Stretch);
+    list->header()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+    for (QAction *top : menuBar()->actions()) {
+        QTreeWidgetItem *group = nullptr;
+        for (QAction *a : top->menu()->actions()) {
+            if (a->shortcut().isEmpty())
+                continue;
+            if (!group) {
+                group = new QTreeWidgetItem(list, {top->text().remove('&')});
+                group->setFirstColumnSpanned(true);
+                QFont bold = list->font();
+                bold.setBold(true);
+                group->setFont(0, bold);
+            }
+            auto *item = new QTreeWidgetItem(group, {a->text().remove('&').remove(QString::fromUtf8("\xE2\x80\xA6")),
+                                                     a->shortcut().toString(QKeySequence::NativeText)});
+            item->setTextAlignment(1, Qt::AlignRight | Qt::AlignVCenter);
+        }
+    }
+    list->expandAll();
+    m_shortcuts->setWidget(list);
+    addDockWidget(Qt::LeftDockWidgetArea, m_shortcuts);
+    const QAbstractItemView *items = list;
+    resizeDocks({m_shortcuts}, {items->sizeHintForColumn(0) + items->sizeHintForColumn(1) + 40}, Qt::Horizontal);
+    shortcuts->setText(tr("&Keyboard Shortcuts"));
+    shortcuts->setCheckable(true);
+    connect(shortcuts, &QAction::triggered, m_shortcuts, &QWidget::setVisible);
+    connect(m_shortcuts, &QDockWidget::visibilityChanged, shortcuts, [this, shortcuts] { shortcuts->setChecked(!m_shortcuts->isHidden()); });
+    m_shortcuts->setVisible(m_settings.value("shortcuts", true).toBool());
+    shortcuts->setChecked(!m_shortcuts->isHidden());
+
     m_kernel = new QLabel(this);
     m_words = new QLabel(this);
     statusBar()->addPermanentWidget(m_kernel);
@@ -389,6 +514,7 @@ void MainWindow::applySettings()
     m_editor->applyTheme();
     m_editor->renderer()->setSpellCheck(m_settings.value("spell", true).toBool());
     m_editor->kernel()->python = m_settings.value("python").toString();     // empty: Jotter chooses
+    m_editor->kernel()->setEnvironment(Kernel::parseEnvironment(m_settings.value("env").toString()));
     m_dark->setChecked(th.dark);
     m_spell->setChecked(m_editor->renderer()->spellCheck());
 }
@@ -572,6 +698,7 @@ void MainWindow::closeEvent(QCloseEvent *e)
         return;
     }
     m_settings.setValue("geometry", saveGeometry());
+    m_settings.setValue("shortcuts", !m_shortcuts->isHidden());
     clearRecovery();
     m_editor->kernel()->shutdown();
     m_editor->store().tidy();
@@ -778,6 +905,173 @@ void MainWindow::insertTable()
 void MainWindow::insertPlot()
 {
     m_editor->insertCell(QString::fromLatin1(kPlot), "python", true);
+}
+
+// Starting a database: which file, what the table is called, what its columns
+// are and what kind of data each one holds. The answer goes into the document
+// as a sql cell and is run, so the document shows how its database was made.
+void MainWindow::insertDatabase()
+{
+    static const struct { const char *label, *type; } kinds[] = {
+        {QT_TR_NOOP("Text"), "text"}, {QT_TR_NOOP("Whole number"), "integer"}, {QT_TR_NOOP("Decimal number"), "real"},
+        {QT_TR_NOOP("Date"), "date"}, {QT_TR_NOOP("Yes / No"), "boolean"}};
+    QDialog dialog(this);
+    dialog.setWindowTitle(tr("Database"));
+    auto *form = new QFormLayout(&dialog);
+    auto *file = new QLineEdit((m_path.isEmpty() ? QString("data") : QFileInfo(m_path).completeBaseName()) + ".db", &dialog);
+    file->setObjectName("database");
+    auto *table = new QLineEdit(&dialog);
+    table->setObjectName("table");
+    table->setPlaceholderText(tr("for example  orders"));
+    auto *columns = new QTableWidget(0, 2, &dialog);
+    columns->setHorizontalHeaderLabels({tr("Column"), tr("Kind of data")});
+    columns->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
+    columns->verticalHeader()->hide();
+    columns->setMinimumSize(360, 200);
+    auto addRow = [&] {
+        const int row = columns->rowCount();
+        columns->insertRow(row);
+        auto *kind = new QComboBox(columns);
+        for (const auto &k : kinds)
+            kind->addItem(tr(k.label), QString::fromLatin1(k.type));
+        columns->setCellWidget(row, 1, kind);
+    };
+    for (int i = 0; i < 4; ++i)
+        addRow();
+    columns->setColumnWidth(1, columns->cellWidget(0, 1)->sizeHint().width() + 8);      // room for the longest kind
+    form->addRow(tr("Database file:"), file);
+    form->addRow(tr("Table:"), table);
+    form->addRow(tr("Columns:"), columns);
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    form->addRow(buttons);
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+
+    auto name = [columns](int row) {
+        const QTableWidgetItem *item = columns->item(row, 0);
+        return item ? item->text().trimmed() : QString();
+    };
+    auto update = [&] {
+        if (!name(columns->rowCount() - 1).isEmpty())
+            addRow();           // always a free line for one more column
+        bool any = false;
+        for (int row = 0; row < columns->rowCount(); ++row)
+            any = any || !name(row).isEmpty();
+        buttons->button(QDialogButtonBox::Ok)->setEnabled(any && !table->text().trimmed().isEmpty());
+    };
+    connect(table, &QLineEdit::textChanged, &dialog, update);
+    connect(columns, &QTableWidget::itemChanged, &dialog, update);
+    update();
+    table->setFocus();
+    if (dialog.exec() != QDialog::Accepted)
+        return;
+
+    QStringList lines;
+    for (int row = 0; row < columns->rowCount(); ++row)
+        if (!name(row).isEmpty())
+            lines << "    " + sqlName(name(row)) + " " + static_cast<QComboBox *>(columns->cellWidget(row, 1))->currentData().toString();
+    QString code;
+    const QString db = file->text().trimmed();
+    if (!db.isEmpty())
+        code = ".open " + (db.contains(' ') ? '"' + db + '"' : db) + "\n";
+    const QString t = sqlName(table->text().trimmed());
+    code += "create table if not exists " + t + " (\n" + lines.join(",\n") + "\n);\nselect * from " + t + ";";
+    m_editor->insertCell(code, "sql", true);
+}
+
+// Help > Check for Updates: ask where releases are published whether there is
+// a newer Jotter, and put it in place of this one if this one can be replaced
+// (the Windows installer, the AppImage). Nothing is asked of the network until
+// this is chosen.
+void MainWindow::checkForUpdates()
+{
+    const QString python = m_editor->kernel()->python.isEmpty() ? defaultPython() : m_editor->kernel()->python;
+    const QString mine = QStringLiteral(JOTTER_VERSION);
+    QByteArray out;
+    QString why;
+    if (!runUpdater(this, python, {"latest"}, tr("Looking for a newer Jotter…"), false, &out, &why)) {
+        if (!why.isEmpty())
+            QMessageBox::warning(this, tr("Jotter"), tr("Could not look for a newer Jotter:\n%1").arg(why));
+        return;
+    }
+    const QJsonObject info = QJsonDocument::fromJson(out).object();
+    const QString version = info.value("version").toString();
+    if (QVersionNumber::fromString(version) <= QVersionNumber::fromString(mine)) {
+        QMessageBox::information(this, tr("Jotter"), tr("Jotter %1 is the newest there is.").arg(mine));
+        return;
+    }
+#ifdef Q_OS_WIN
+    const QString name = "Jotter-Setup-x86_64.exe", target = QDir::tempPath() + "/" + name;
+    const bool replaceable = true;
+#else
+    // Only an AppImage is one file that can be swapped for another; a build
+    // from source or an unpacked tarball is shown where the new one is.
+    const QString image = qEnvironmentVariable("APPIMAGE");
+    const QString name = "Jotter-x86_64.AppImage", target = image + ".new";
+    const bool replaceable = !image.isEmpty() && QFileInfo(QFileInfo(image).absolutePath()).isWritable();
+#endif
+    const QString url = info.value("files").toObject().value(name).toString();
+    if (!replaceable || url.isEmpty()) {
+        if (QMessageBox::question(this, tr("Jotter"), tr("Jotter %1 is out (this is %2). Open the page it can be downloaded from?").arg(version, mine))
+            == QMessageBox::Yes)
+            QDesktopServices::openUrl(QUrl(info.value("page").toString()));
+        return;
+    }
+    if (QMessageBox::question(this, tr("Jotter"), tr("Jotter %1 is out (this is %2). Install it now?").arg(version, mine)) != QMessageBox::Yes)
+        return;
+    out.clear();
+    if (!runUpdater(this, python, {"fetch", url, target}, tr("Downloading Jotter %1…").arg(version), true, &out, &why)) {
+        QFile::remove(target);
+        if (!why.isEmpty())
+            QMessageBox::warning(this, tr("Jotter"), tr("Could not download Jotter %1:\n%2").arg(version, why));
+        return;
+    }
+#ifdef Q_OS_WIN
+    // The installer replaces the program's files, so this Jotter has to be gone first.
+    if (!close())
+        return;         // there were unsaved changes and the answer was Cancel
+    QProcess::startDetached(target, {});
+    QCoreApplication::quit();
+#else
+    QFile::setPermissions(target, QFile::permissions(image) | QFile::ExeOwner);
+    if (std::rename(QFile::encodeName(target).constData(), QFile::encodeName(image).constData()) != 0) {
+        QFile::remove(target);
+        QMessageBox::warning(this, tr("Jotter"), tr("Could not replace %1.").arg(image));
+        return;
+    }
+    QMessageBox::information(this, tr("Jotter"), tr("Jotter %1 is in place. It starts the next time Jotter is opened.").arg(version));
+#endif
+}
+
+// Passwords, keys, which database: things cells need and a document should not
+// carry. They live in Jotter's settings and reach every cell as environment
+// variables.
+void MainWindow::editEnvironment()
+{
+    QDialog dialog(this);
+    dialog.setWindowTitle(tr("Environment Variables"));
+    auto *layout = new QVBoxLayout(&dialog);
+    auto *label = new QLabel(tr("One NAME=value per line. Every cell can read them, in any language. They are kept "
+                                "in Jotter's settings on this computer, not in the document.\n"
+                                "DATABASE names the SQLite file that sql cells use."), &dialog);
+    label->setWordWrap(true);
+    layout->addWidget(label);
+    auto *edit = new QPlainTextEdit(&dialog);
+    edit->setFont(m_editor->theme.monoFont());      // as in the formula box
+    edit->setLineWrapMode(QPlainTextEdit::NoWrap);
+    edit->setPlaceholderText("API_KEY=...\nDATABASE=shop.db");
+    m_settings.sync();      // another window may have changed them
+    edit->setPlainText(m_settings.value("env").toString());
+    layout->addWidget(edit);
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    layout->addWidget(buttons);
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    dialog.resize(480, 320);
+    if (dialog.exec() != QDialog::Accepted)
+        return;
+    m_settings.setValue("env", edit->toPlainText());
+    m_editor->kernel()->setEnvironment(Kernel::parseEnvironment(edit->toPlainText()));
 }
 
 // ---- crash recovery -------------------------------------------------------------

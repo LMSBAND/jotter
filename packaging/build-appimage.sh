@@ -30,3 +30,7 @@ export VERSION=$(sed -n 's/^project(jotter VERSION \([0-9.]*\).*/\1/p' $SRC/CMak
     -i $A/usr/share/icons/hicolor/scalable/apps/jotter.svg \
     --plugin qt --output appimage
 mv Jotter*.AppImage /out/Jotter-x86_64.AppImage
+
+# The same thing as a folder to unpack, for where an AppImage will not start
+# (no FUSE) or is not wanted: Jotter/AppRun starts it.
+tar -C $WORK --transform 's,^AppDir,Jotter,' -czf /out/Jotter-x86_64.tar.gz AppDir

@@ -7,6 +7,7 @@
 
 class QAction;
 class QComboBox;
+class QDockWidget;
 class QLabel;
 class QLineEdit;
 class QMenu;
@@ -60,6 +61,9 @@ private:
     void insertPicture();
     void insertTable();
     void insertPlot();
+    void insertDatabase();
+    void editEnvironment();
+    void checkForUpdates();
 
     QString recoveryFile() const;
     void writeRecovery();
@@ -71,6 +75,7 @@ private:
     QSettings m_settings;
     QTimer m_recoveryTimer, m_wordTimer;
     QWidget *m_findBar = nullptr;
+    QDockWidget *m_shortcuts = nullptr;
     QLineEdit *m_find = nullptr, *m_replace = nullptr;
     QComboBox *m_style = nullptr, *m_face = nullptr;
     QMenu *m_faces = nullptr;

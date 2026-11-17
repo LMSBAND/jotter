@@ -13,6 +13,10 @@ sudo apt install qtbase5-dev qtwebengine5-dev libkf5syntaxhighlighting-dev libmd
 `jotter [file.md]`, or "Jotter" in the application menu. `build/jotter-tests`
 runs the tests.
 
+Without those packages but with Docker: `packaging/local.sh` builds in the
+container the AppImage is made in and installs to `~/.local/bin`, and
+`packaging/local.sh test` runs the tests there.
+
 Built this way it uses the machine's `python3` for Python cells (with whatever
 numpy/matplotlib that Python has), `pdflatex` + `pdftocairo` for math (or
 matplotlib if there is no LaTeX), and the tools you already have for other
@@ -22,7 +26,7 @@ kind of cell does not run.
 ## One file for other machines
 
 ```
-packaging/appimage.sh       # needs Docker; writes dist/Jotter-x86_64.AppImage
+packaging/appimage.sh       # needs Docker; writes dist/Jotter-x86_64.AppImage and .tar.gz
 ```
 
 The AppImage carries Qt, the PDF engine, a Python with numpy and matplotlib, an
@@ -33,6 +37,9 @@ where `pdflatex` exists formulas are set with it, elsewhere by a built-in
 renderer that handles ordinary formulas but not matrices or `aligned`. If the
 machine's own `python3` already has numpy and matplotlib, cells use that one
 (and so see the other packages installed there) instead of the shipped one.
+
+`Jotter-x86_64.tar.gz` is the same build as a folder, for a machine where an
+AppImage will not start: unpack it anywhere and run `Jotter/AppRun`.
 
 ## Windows
 
@@ -73,8 +80,32 @@ Type. Markdown habits work as you go: `# ` heading, `- ` list, `1. ` numbered,
 
 Python cells share one session per document, top to bottom, like a notebook:
 variables carry over, plots appear under the cell. Click a cell's language tag
-to change it; click the triangle to run. Paste or drop pictures straight in and
+to change it; click the triangle to run; click the x to delete the cell and
+what it printed (Ctrl+Z brings both back). Paste or drop pictures straight in and
 drag a corner to resize. Tab walks table cells.
+
+A `sql` cell runs in that same session, on SQLite. The rows a query gives back
+are printed under the cell and are `_` in the next Python cell (`_["score"]` is
+one column, `_.columns` the names), and `:name` in a query is the Python
+variable `name`. Tables live in a scratch database that lasts as long as the
+session, unless a line `.open shop.db` in a cell (as in the `sqlite3` shell) or
+the `DATABASE` variable names a file to keep them in.
+
+Insert > Database starts one without writing any SQL: it asks for the file, the
+table's name, its columns and what kind of data each holds, and puts the answer
+in the document as a `sql` cell, which it runs.
+
+Cell > Environment Variables holds `NAME=value` lines that every cell finds in
+its environment, in any language. They are kept in Jotter's settings on this
+computer, not in the document, so a password or a key stays out of the file.
+
+Help > Check for Updates asks GitHub whether a newer release is out. The
+Windows installer and the AppImage then fetch it and put it in their own place;
+a build from source or an unpacked tarball is shown the download page. Nothing
+is asked of the network before that is chosen.
+
+The list down the left side shows every shortcut the menus have. Its close
+button or View > Keyboard Shortcuts hides it, and Jotter remembers that.
 
 The font box in the toolbar (or Format > Font) sets the whole document in one of
 a few faces that are part of Jotter: Roboto, Atkinson Hyperlegible, EB Garamond,

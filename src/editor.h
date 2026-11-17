@@ -48,6 +48,7 @@ public:
     void noteObject(int pos, const QRectF &rect, int type);
     QImage mathImage(const QString &tex, bool display, const QColor &color, int width, int height);
     QString cellState(const QTextBlock &block) const;   // "", "queued" or "running"
+    void deleteCell(const QTextBlock &head);            // the cell and what it printed (the x on its tag)
 
     // ---- what the cursor is in (for the toolbar) ---------------------------
     Kind currentKind() const;
@@ -144,8 +145,9 @@ private:
 
     // cells
     QRectF bandRect(const QTextBlock &first, const QTextBlock &last) const;
-    void tagRects(const QTextBlock &head, QRectF *play, QRectF *label) const;
-    bool tagAt(const QPoint &viewportPos, QTextBlock *head, bool *play) const;
+    enum TagPart { TagLabel, TagPlay, TagClose };
+    void tagRects(const QTextBlock &head, QRectF *play, QRectF *label, QRectF *close) const;
+    bool tagAt(const QPoint &viewportPos, QTextBlock *head, int *part) const;
     void languageMenu(const QTextBlock &head, const QPoint &globalPos);
     void setCellLanguage(const QTextBlock &head, const QString &lang);
     void enqueue(const QTextBlock &head);

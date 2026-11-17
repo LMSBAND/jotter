@@ -6,7 +6,9 @@ uses the standard library only.
 
   stdin    one JSON request per line:
              {"op": "exec", "id": n, "code": "...", "figdir": "/path"}
+             {"op": "exec", "id": n, "lang": "sql", "code": "..."}
              {"op": "chdir", "path": "/path"}
+             {"op": "env", "set": {"NAME": "value"}, "unset": ["NAME"]}
              {"op": "interrupt"}        (Windows; elsewhere Jotter sends SIGINT)
   stdout   whatever the cell prints (stderr is merged in by the parent),
            interleaved with control records of the form  \\x1e{json}\\n :
@@ -211,6 +213,147 @@ def run_cell(code, n, ns):
     return ok
 
 
+# ---- SQL cells -------------------------------------------------------------
+# A sql cell runs in this process too, so it and the Python cells can hand
+# things to each other: a query's rows are `_` in Python, and :name in a query
+# is the Python variable of that name. A line `.open file`, as in the sqlite3
+# shell, picks the database for that cell and the ones after it.
+
+SHOWN_ROWS = 50
+_databases = {}
+
+
+class Rows(list):
+    """What a query gave back: a list of rows. rows.columns has the column
+    names and rows["name"] is one column, as a list."""
+
+    def __init__(self, rows=(), columns=()):
+        super().__init__(rows)
+        self.columns = list(columns)
+
+    def __getitem__(self, key):
+        if isinstance(key, str):
+            if key not in self.columns:
+                raise KeyError(key)
+            i = self.columns.index(key)
+            return [row[i] for row in self]
+        return super().__getitem__(key)
+
+    def __repr__(self):
+        def cell(value):
+            if value is None:
+                return "NULL"
+            if isinstance(value, bytes):
+                return "<%d bytes>" % len(value)
+            return str(value).replace("\n", " ")
+
+        shown = [[cell(v) for v in row] for row in self[:SHOWN_ROWS]]
+        widths = [max([len(str(name))] + [len(row[i]) for row in shown]) for i, name in enumerate(self.columns)]
+        right = [bool(self) and all(isinstance(row[i], (int, float)) or row[i] is None for row in self[:SHOWN_ROWS])
+                 for i in range(len(self.columns))]
+
+        def line(cells):
+            return "  ".join(c.rjust(w) if r else c.ljust(w) for c, w, r in zip(cells, widths, right)).rstrip()
+
+        lines = [line([str(name) for name in self.columns]), line(["-" * w for w in widths])]
+        lines += [line(row) for row in shown]
+        if len(self) > SHOWN_ROWS:
+            lines.append("... %d rows in all" % len(self))
+        return "\n".join(lines)
+
+
+class _Variables(dict):
+    """:name in a query, looked up among the Python variables."""
+
+    def __init__(self, ns):
+        super().__init__()
+        self.ns = ns
+
+    def __getitem__(self, name):
+        value = self.ns[name]
+        if type(value).__module__ == "numpy" and hasattr(value, "item"):
+            value = value.item()        # a numpy number is not one of SQLite's types
+        return value
+
+
+def database():
+    """The database sql cells talk to: the SQLite file named by the DATABASE
+    environment variable, or without one a scratch database that lasts as long
+    as this session."""
+    import sqlite3
+    name = os.environ.get("DATABASE", "").strip()
+    path = os.path.abspath(os.path.expanduser(name)) if name else ":memory:"
+    conn = _databases.get(path)
+    if conn is None:
+        conn = _databases[path] = sqlite3.connect(path)
+        conn.set_progress_handler(lambda: 0, 20000)     # gives Stop a way into a long query
+    return conn
+
+
+def dot_commands(code):
+    """Act on the `.open file` lines of a cell; gives back the SQL without them."""
+    lines = []
+    for line in code.split("\n"):
+        word = line.strip()
+        if word.startswith(".") and word[1:2].isalpha():
+            command, _, name = word.partition(" ")
+            if command != ".open":
+                raise ValueError("A sql cell knows one dot command, .open file (not %s)." % command)
+            name = name.strip()
+            if len(name) >= 2 and name[0] == name[-1] and name[0] in "\"'":
+                name = name[1:-1]
+            if name:
+                os.environ["DATABASE"] = name
+            else:
+                os.environ.pop("DATABASE", None)        # back to the scratch database
+            line = ""
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def statements(code):
+    import sqlite3
+    parts = code.split(";")
+    text = ""
+    for i, part in enumerate(parts):
+        text += part + (";" if i < len(parts) - 1 else "")
+        if sqlite3.complete_statement(text):
+            yield text
+            text = ""
+    if text.strip():
+        yield text
+
+
+def run_sql(code, ns):
+    try:
+        import sqlite3
+    except ImportError:
+        send(type="error", text="This Python has no sqlite3 module, which sql cells need.")
+        return False
+    try:
+        code = dot_commands(code)
+    except ValueError as e:
+        send(type="error", text=str(e))
+        return False
+    conn = None
+    try:
+        conn = database()
+        for statement in statements(code):
+            if not statement.strip(" \t\r\n;"):
+                continue
+            cursor = conn.execute(statement, _Variables(ns))
+            if cursor.description is not None:
+                ns["_"] = Rows(cursor.fetchall(), [d[0] for d in cursor.description])
+                print(repr(ns["_"]))
+        conn.commit()
+        return True
+    except sqlite3.Error as e:
+        if conn is not None:
+            conn.rollback()
+        send(type="error", text="%s: %s" % (type(e).__name__, e))
+        return False
+
+
 # ---- requests --------------------------------------------------------------
 
 def parse(line):
@@ -302,13 +445,16 @@ def main():
         req = parse(line)
         op = req.get("op")
         if op == "exec":
-            n += 1
             FIGDIR = req.get("figdir") or "."
             try:
                 try:
                     if inbox:
                         inbox.start()
-                    ok = run_cell(req.get("code", ""), n, ns)
+                    if req.get("lang") == "sql":
+                        ok = run_sql(req.get("code", ""), ns)
+                    else:
+                        n += 1
+                        ok = run_cell(req.get("code", ""), n, ns)
                 finally:
                     if inbox:
                         inbox.finish()
@@ -321,6 +467,10 @@ def main():
                 os.chdir(req.get("path", "."))
             except OSError:
                 pass
+        elif op == "env":
+            for name in req.get("unset") or []:
+                os.environ.pop(name, None)
+            os.environ.update(req.get("set") or {})
 
 
 if __name__ == "__main__":

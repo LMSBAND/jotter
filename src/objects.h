@@ -80,6 +80,7 @@ public:
     QSizeF intrinsicSize(QTextDocument *doc, int pos, const QTextFormat &format) override;
     void drawObject(QPainter *painter, const QRectF &rect, QTextDocument *doc, int pos, const QTextFormat &format) override;
     static QRectF playRect(const QRectF &rect);
+    static QRectF closeRect(const QRectF &rect);        // the x that deletes the cell
 
 private:
     QFont font() const;

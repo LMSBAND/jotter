@@ -778,6 +778,54 @@ void Editor::clearOutputs(bool all)
     c.endEditBlock();
 }
 
+// Take a cell out of the document, with whatever it printed. One step to undo.
+void Editor::deleteCell(const QTextBlock &head)
+{
+    if (!head.isValid() || cellHead(head) != head)
+        return;
+    auto same = [&](const QTextCursor &c) {
+        const QTextBlock other = cellHead(c.block());
+        return other.isValid() && other.blockNumber() == head.blockNumber();
+    };
+    // It may be running or waiting to: nothing of that may land on the cell that takes its place.
+    for (int i = m_queue.size() - 1; i >= 0; --i)
+        if (same(m_queue[i]))
+            m_queue.remove(i);
+    if (m_isRunning && same(m_running)) {
+        m_running = QTextCursor();      // what it prints from here on has nowhere to go
+        m_queue.clear();
+        m_kernel->interrupt();
+    }
+
+    const QTextBlock last = cellEnd(head), prev = head.previous(), next = last.next();
+    const int start = head.position(), end = last.position() + last.length() - 1;
+    auto plain = [](const QTextBlock &b) { return b.isValid() && !tableOf(b); };
+    QTextCursor c(document());
+    c.beginEditBlock();
+    if (plain(prev)) {              // from the end of the line above, which stays as it is
+        c.setPosition(start - 1);
+        c.setPosition(end, QTextCursor::KeepAnchor);
+        c.removeSelectedText();
+    } else if (plain(next)) {       // nothing above: the line below moves up, as it is
+        const QTextBlockFormat format = next.blockFormat();
+        const QTextCharFormat chars = next.charFormat();
+        c.setPosition(start);
+        c.setPosition(end + 1, QTextCursor::KeepAnchor);
+        c.removeSelectedText();
+        c.setBlockFormat(format);
+        c.setBlockCharFormat(chars);
+    } else {                        // the cell is all there is: an empty paragraph is left
+        c.setPosition(start);
+        c.setPosition(end, QTextCursor::KeepAnchor);
+        c.removeSelectedText();
+        c.setBlockFormat(QTextBlockFormat());
+        c.setBlockCharFormat(QTextCharFormat());
+    }
+    commit(c);
+    viewport()->update();
+    emit cellsChanged();
+}
+
 // Swap one cell between shown code and the small pill that stands for hidden
 // code (its output stays either way). `start` is where the cell begins; the
 // caller holds the edit block. Positions, not block handles, because the

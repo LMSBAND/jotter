@@ -4,6 +4,7 @@
     <file>jotter.svg</file>
     <file>export.css</file>
     <file>mathtext_worker.py</file>
+    <file>update_worker.py</file>
     <file>fonts/atkinson/AtkinsonHyperlegibleNext-Bold.ttf</file>
     <file>fonts/atkinson/AtkinsonHyperlegibleNext-BoldItalic.ttf</file>
     <file>fonts/atkinson/AtkinsonHyperlegibleNext-Italic.ttf</file>
@@ -68,6 +69,7 @@
     <file>icons/office-chart-line.svg</file>
     <file>icons/preferences-desktop-font.svg</file>
     <file>icons/text-html.svg</file>
+    <file>icons/server-database.svg</file>
     <file>icons/tools-check-spelling.svg</file>
     <file>icons/view-hidden.svg</file>
     <file>icons/view-refresh.svg</file>

@@ -218,12 +218,17 @@ QString FoldHandler::label(const QTextFormat &format) const
 QSizeF FoldHandler::intrinsicSize(QTextDocument *, int, const QTextFormat &format)
 {
     const QFontMetricsF fm(font());
-    return QSizeF(fm.horizontalAdvance(label(format)) + fm.height() * 2.2, fm.height() + 8);
+    return QSizeF(fm.horizontalAdvance(label(format)) + fm.height() * 2.2 + fm.height() + 8, fm.height() + 8);
 }
 
 QRectF FoldHandler::playRect(const QRectF &rect)
 {
     return QRectF(rect.left(), rect.top(), rect.height() + 4, rect.height());
+}
+
+QRectF FoldHandler::closeRect(const QRectF &rect)
+{
+    return QRectF(rect.right() - rect.height() - 2, rect.top(), rect.height(), rect.height());
 }
 
 void FoldHandler::drawObject(QPainter *painter, const QRectF &rect, QTextDocument *doc, int pos, const QTextFormat &format)
@@ -256,7 +261,13 @@ void FoldHandler::drawObject(QPainter *painter, const QRectF &rect, QTextDocumen
         QString name = langName(format.stringProperty(PLang));
         text = QString::fromUtf8("%1  \xC2\xB7  %2\xE2\x80\xA6").arg(name.isEmpty() ? "code" : name, state);
     }
-    painter->drawText(QRectF(pr.right(), rect.top(), rect.right() - pr.right(), rect.height()), Qt::AlignVCenter | Qt::AlignLeft, text);
+    const QRectF cr = closeRect(rect);
+    painter->drawText(QRectF(pr.right(), rect.top(), cr.left() - pr.right(), rect.height()), Qt::AlignVCenter | Qt::AlignLeft, text);
+    const QPointF mid = cr.center();
+    const qreal d = cr.height() * 0.17;
+    painter->setPen(QPen(th.muted, 1.4, Qt::SolidLine, Qt::RoundCap));
+    painter->drawLine(mid + QPointF(-d, -d), mid + QPointF(d, d));
+    painter->drawLine(mid + QPointF(-d, d), mid + QPointF(d, -d));
     painter->restore();
 }
 

@@ -943,9 +943,11 @@ void Editor::mousePressEvent(QMouseEvent *e)
     if (e->button() == Qt::LeftButton) {
         const QPointF point = docPoint(e->pos());
         QTextBlock head;
-        bool play = false;
-        if (tagAt(e->pos(), &head, &play)) {
-            if (!play)
+        int part = 0;
+        if (tagAt(e->pos(), &head, &part)) {
+            if (part == TagClose)
+                deleteCell(head);
+            else if (part == TagLabel)
                 languageMenu(head, e->globalPos());
             else if (cellState(head) == "running")
                 interrupt();
@@ -956,6 +958,10 @@ void Editor::mousePressEvent(QMouseEvent *e)
         int pos = 0, type = 0;
         QRectF rect;
         if (objectAt(point, &pos, &rect, &type)) {
+            if (type == ObjFold && FoldHandler::closeRect(rect).contains(point)) {
+                deleteCell(document()->findBlock(pos));
+                return;
+            }
             if (type == ObjFold && FoldHandler::playRect(rect).contains(point)) {
                 const QTextBlock block = document()->findBlock(pos);
                 if (cellState(block) == "running")
@@ -997,10 +1003,10 @@ void Editor::mouseMoveEvent(QMouseEvent *e)
     }
     Qt::CursorShape shape = Qt::IBeamCursor;
     QTextBlock head;
-    bool play = false;
+    int part = 0;
     int pos = 0, type = 0;
     QRectF rect;
-    if (tagAt(e->pos(), &head, &play)) {
+    if (tagAt(e->pos(), &head, &part)) {
         shape = Qt::PointingHandCursor;
     } else if (objectAt(point, &pos, &rect, &type)) {
         shape = Qt::ArrowCursor;
@@ -1259,7 +1265,7 @@ QRectF Editor::bandRect(const QTextBlock &first, const QTextBlock &last) const
     return QRectF(x0, top, x1 - x0, bottom - top).adjusted(0.5, 0.5, -0.5, -0.5);
 }
 
-void Editor::tagRects(const QTextBlock &head, QRectF *play, QRectF *label) const
+void Editor::tagRects(const QTextBlock &head, QRectF *play, QRectF *label, QRectF *close) const
 {
     const QRectF band = bandRect(head, runLast(head));
     const QFontMetricsF fm(theme.uiFont(0.78));
@@ -1270,11 +1276,12 @@ void Editor::tagRects(const QTextBlock &head, QRectF *play, QRectF *label) const
     if (!state.isEmpty())
         text = state + QString::fromUtf8("\xE2\x80\xA6");
     const qreal h = fm.height() + 4, w = fm.horizontalAdvance(text) + 12;
-    *label = QRectF(band.right() - w - 4, band.top() + 3, w, h);
+    *close = QRectF(band.right() - h - 4, band.top() + 3, h, h);
+    *label = QRectF(close->left() - w - 2, close->top(), w, h);
     *play = QRectF(label->left() - h - 2, label->top(), h, h);
 }
 
-bool Editor::tagAt(const QPoint &viewportPos, QTextBlock *head, bool *play) const
+bool Editor::tagAt(const QPoint &viewportPos, QTextBlock *head, int *part) const
 {
     // The tag sits in the band's top padding, so the nearest line may be the
     // first code line or the block above it.
@@ -1284,21 +1291,21 @@ bool Editor::tagAt(const QPoint &viewportPos, QTextBlock *head, bool *play) cons
         if (!b.isValid() || kindOf(b) != Code || tableOf(b))
             continue;
         const QTextBlock first = runFirst(b);
-        QRectF playRect, labelRect;
-        tagRects(first, &playRect, &labelRect);
+        QRectF playRect, labelRect, closeRect;
+        tagRects(first, &playRect, &labelRect, &closeRect);
         QString info, code;
         cellSource(first, &info, &code);
         const bool runnable = Kernel::canRun(info) || !cellState(first).isEmpty();
-        if (runnable && playRect.contains(point)) {
-            *head = first;
-            *play = true;
-            return true;
-        }
-        if (labelRect.contains(point)) {
-            *head = first;
-            *play = false;
-            return true;
-        }
+        if (closeRect.contains(point))
+            *part = TagClose;
+        else if (runnable && playRect.contains(point))
+            *part = TagPlay;
+        else if (labelRect.contains(point))
+            *part = TagLabel;
+        else
+            continue;
+        *head = first;
+        return true;
     }
     return false;
 }
@@ -1340,8 +1347,8 @@ void Editor::paintUnder(QPainter &p, const QRectF &clip, int firstVisibleY)
                 p.setPen(QPen(state.isEmpty() ? theme.codeBorder : theme.accent, 1));
                 p.drawPath(path);
 
-                QRectF play, label;
-                tagRects(first, &play, &label);
+                QRectF play, label, close;
+                tagRects(first, &play, &label, &close);
                 QString info, code;
                 cellSource(first, &info, &code);
                 QString text = langName(info);
@@ -1349,10 +1356,15 @@ void Editor::paintUnder(QPainter &p, const QRectF &clip, int firstVisibleY)
                     text = QStringLiteral("text");
                 if (!state.isEmpty())
                     text = state + QString::fromUtf8("\xE2\x80\xA6");
-                p.fillRect(play.united(label).adjusted(-4, 0, 0, 0), theme.codeBg);     // keep long first lines legible
+                p.fillRect(play.united(close).adjusted(-4, 0, 0, 0), theme.codeBg);     // keep long first lines legible
                 p.setFont(theme.uiFont(0.78));
                 p.setPen(state.isEmpty() ? theme.muted : theme.accent);
                 p.drawText(label, Qt::AlignCenter, text);
+                const QPointF cross = close.center();       // the x: delete this cell and what it printed
+                const qreal d = close.height() * 0.17;
+                p.setPen(QPen(theme.muted, 1.4, Qt::SolidLine, Qt::RoundCap));
+                p.drawLine(cross + QPointF(-d, -d), cross + QPointF(d, d));
+                p.drawLine(cross + QPointF(-d, d), cross + QPointF(d, -d));
                 p.setPen(Qt::NoPen);
                 p.setBrush(state.isEmpty() ? theme.muted : theme.accent);
                 const QPointF mid = play.center();

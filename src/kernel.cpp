@@ -7,9 +7,11 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QProcessEnvironment>
+#include <QRegularExpression>
 #include <QStandardPaths>
 #include <QTemporaryDir>
 #include <QTextCodec>
@@ -33,6 +35,12 @@ const char kMark = 0x1e;    // starts a control record in the kernel's output st
 bool isPython(const QString &name)
 {
     return name == "python" || name == "python3" || name == "py" || name == "ipython";
+}
+
+// Runs in the Python kernel as well (SQLite, through Python's sqlite3).
+bool isSql(const QString &name)
+{
+    return name == "sql";
 }
 
 struct Runner { QString ext, command, prelude = QString(); };
@@ -202,12 +210,45 @@ Kernel::~Kernel()
 bool Kernel::canRun(const QString &info)
 {
     const QString name = langName(info);
-    if (isPython(name))
+    if (isPython(name) || isSql(name))
         return true;
     const auto it = runners().constFind(name);
     if (it == runners().constEnd())
         return false;
     return !QStandardPaths::findExecutable(it->command.section(' ', 0, 0)).isEmpty();
+}
+
+void Kernel::setEnvironment(const QMap<QString, QString> &vars)
+{
+    QJsonArray unset;
+    for (auto it = m_env.constBegin(); it != m_env.constEnd(); ++it)
+        if (!vars.contains(it.key()))
+            unset.append(it.key());
+    m_env = vars;
+    if (m_py && m_py->state() != QProcess::NotRunning) {       // a session that is already going learns of the change
+        QJsonObject set;
+        for (auto it = vars.constBegin(); it != vars.constEnd(); ++it)
+            set.insert(it.key(), it.value());
+        send({{"op", "env"}, {"set", set}, {"unset", unset}});
+    }
+}
+
+// One NAME=value per line, as in a .env file: blank lines and # comments are
+// skipped, "export " in front and quotes around the value are allowed.
+QMap<QString, QString> Kernel::parseEnvironment(const QString &text)
+{
+    static const QRegularExpression rx(QStringLiteral(R"(^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$)"));
+    QMap<QString, QString> vars;
+    for (const QString &line : text.split('\n')) {
+        const auto m = rx.match(line);
+        if (!m.hasMatch())
+            continue;
+        QString value = m.captured(2).trimmed();
+        if (value.size() >= 2 && (value.startsWith('"') || value.startsWith('\'')) && value.endsWith(value.at(0)))
+            value = value.mid(1, value.size() - 2);
+        vars.insert(m.captured(1), value);
+    }
+    return vars;
 }
 
 void Kernel::run(const QString &info, const QString &code, const QString &cwd, const QString &figdir, Done done)
@@ -275,7 +316,8 @@ void Kernel::pump()
         return;
     m_job = m_queue.dequeue();
     setState("busy");
-    if (isPython(langName(m_job->info)))
+    const QString name = langName(m_job->info);
+    if (isPython(name) || isSql(name))
         runPython(m_job);
     else
         runOnce(m_job);
@@ -304,7 +346,10 @@ void Kernel::runPython(Job *job)
         m_py = new QProcess(this);
         m_py->setProcessChannelMode(QProcess::MergedChannels);
         const QString exe = python.isEmpty() ? defaultPython() : python;
-        m_py->setProcessEnvironment(pythonEnvironment(exe));
+        QProcessEnvironment env = pythonEnvironment(exe);
+        for (auto it = m_env.constBegin(); it != m_env.constEnd(); ++it)
+            env.insert(it.key(), it.value());
+        m_py->setProcessEnvironment(env);
         m_py->setWorkingDirectory(job->cwd);
         connect(m_py, &QProcess::readyReadStandardOutput, this, &Kernel::readPython);
         connect(m_py, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this, [this](int code, QProcess::ExitStatus) {
@@ -336,7 +381,10 @@ void Kernel::runPython(Job *job)
         m_pyCwd = job->cwd;
         send({{"op", "chdir"}, {"path", job->cwd}});
     }
-    send({{"op", "exec"}, {"id", ++m_seq}, {"code", job->code}, {"figdir", job->figdir}});
+    QJsonObject request{{"op", "exec"}, {"id", ++m_seq}, {"code", job->code}, {"figdir", job->figdir}};
+    if (isSql(langName(job->info)))
+        request.insert("lang", "sql");
+    send(request);
 }
 
 void Kernel::send(const QJsonObject &msg)
@@ -437,6 +485,12 @@ void Kernel::runOnce(Job *job)
     QProcess *p = m_once = new QProcess(this);
     p->setProcessChannelMode(QProcess::MergedChannels);
     p->setWorkingDirectory(cwd);
+    if (!m_env.isEmpty()) {
+        QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+        for (auto it = m_env.constBegin(); it != m_env.constEnd(); ++it)
+            env.insert(it.key(), it.value());
+        p->setProcessEnvironment(env);
+    }
     connect(p, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this, [this, p, out](int code, QProcess::ExitStatus status) {
         if (p != m_once)
             return;

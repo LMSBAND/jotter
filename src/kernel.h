@@ -2,12 +2,14 @@
 //
 // Python cells go to one persistent kernel process per document
 // (data/kernel_worker.py), so variables carry over between cells like in a
-// notebook. Other languages are one-shot: write the cell to a temp file, run the
+// notebook. SQL cells run in that process too, which is how the two hand
+// things to each other. Other languages are one-shot: write the cell to a temp file, run the
 // tool, collect what it prints (and the picture, for diagram languages).
 //
 // Either way the result is a list of output items, in order.
 #pragma once
 
+#include <QMap>
 #include <QObject>
 #include <QProcess>
 #include <QQueue>
@@ -40,6 +42,12 @@ public:
     ~Kernel() override;
 
     QString python;                                 // interpreter for Python cells; empty = defaultPython()
+
+    // Variables every cell finds in its environment, whatever its language.
+    // They are the user's own (passwords, the database to use): kept in
+    // Jotter's settings, never in a document.
+    void setEnvironment(const QMap<QString, QString> &vars);
+    static QMap<QString, QString> parseEnvironment(const QString &text);    // "NAME=value" lines
 
     static bool canRun(const QString &info);
     // Queue a cell. done(items, ok) is called when it finishes.
@@ -74,6 +82,7 @@ private:
     QString m_state = QStringLiteral("off");
     QQueue<Job *> m_queue;
     Job *m_job = nullptr;
+    QMap<QString, QString> m_env;
     QProcess *m_py = nullptr;       // the kernel process
     QString m_pyCwd;
     QProcess *m_once = nullptr;     // a one-shot process

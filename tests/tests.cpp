@@ -13,7 +13,14 @@
 
 #include <QApplication>
 #include <QAbstractTextDocumentLayout>
+#include <QDialogButtonBox>
+#include <QDockWidget>
 #include <QElapsedTimer>
+#include <QMessageBox>
+#include <QUrl>
+#include <QPushButton>
+#include <QTableWidget>
+#include <QTreeWidget>
 #include <QDialog>
 #include <QDir>
 #include <QSettings>
@@ -552,6 +559,62 @@ static void test_kernel()
     CHECK_EQ(text(base + 2), QString("5\n"));
     results.remove(base, results.size() - base);
 
+    // sql cells run in the Python session: a query's rows are `_` there, :name is a Python variable
+    run("sql", "create table t(name text, score int);\ninsert into t values ('ann', 91), ('bob', 78);\n"
+               "select name, score from t order by score");
+    run("python", "cutoff = 80\nprint(_.columns, _['score'], list(_))");
+    run("sql", "select name from t where score > :cutoff");
+    run("sql", "select * from nowhere");
+    run("python", "_[0][0]");
+    CHECK(wait(base + 5));
+    CHECK(Kernel::canRun("sql"));
+    CHECK_EQ(text(base), QString("name  score\n----  -----\nbob      78\nann      91\n"));
+    CHECK_EQ(text(base + 1), QString("['name', 'score'] [78, 91] [('bob', 78), ('ann', 91)]\n"));
+    CHECK_EQ(text(base + 2), QString("name\n----\nann\n"));
+    CHECK(!results.value(base + 3).ok && type(base + 3) == Kernel::Item::Error && text(base + 3).contains("no such table: nowhere"));
+    CHECK_EQ(text(base + 4), QString("'ann'\n"));
+    results.remove(base, results.size() - base);
+
+    // .open, as in the sqlite3 shell: a file for this cell and the ones after it; alone, back to the scratch tables
+    run("sql", ".open \"made here.db\"\ncreate table if not exists p (a text, n integer);\nselect * from p;");
+    run("sql", "insert into p values ('x', 1);\nselect count(*) as n from p");
+    run("sql", ".open\nselect count(*) as n from t");
+    run("sql", ".tables");
+    CHECK(wait(base + 4));
+    CHECK_EQ(text(base), QString("a  n\n-  -\n"));
+    CHECK(QFile::exists(tmp.path() + "/made here.db"));
+    CHECK_EQ(text(base + 1), QString("n\n-\n1\n"));
+    CHECK_EQ(text(base + 2), QString("n\n-\n2\n"));
+    CHECK(!results.value(base + 3).ok && text(base + 3).contains(".open"));
+    results.remove(base, results.size() - base);
+
+    // stored variables reach every language: a session that is running, a one-shot tool, a fresh session
+    const auto vars = Kernel::parseEnvironment("# mine\nJOTTER_SECRET = \"s3 cret\"\nexport DATABASE=shop.db\n\nnot a variable\n");
+    CHECK(vars.size() == 2 && vars.value("JOTTER_SECRET") == "s3 cret" && vars.value("DATABASE") == "shop.db");
+    k.setEnvironment(vars);
+    const QString secret = "import os\nprint(os.environ.get('JOTTER_SECRET'))";
+    run("python", secret);
+#ifdef Q_OS_WIN
+    run(shell, "@echo %JOTTER_SECRET%");
+#else
+    run(shell, "echo \"$JOTTER_SECRET\"");
+#endif
+    run("sql", "create table orders(id int)");      // DATABASE: a file beside the document
+    CHECK(wait(base + 3));
+    k.restart();
+    run("python", secret);
+    k.setEnvironment({});
+    run("python", secret);
+    run("sql", "select count(*) as n from t");      // back on the scratch database, which the restart emptied
+    CHECK(wait(base + 6));
+    CHECK_EQ(text(base), QString("s3 cret\n"));
+    CHECK(text(base + 1).startsWith("s3 cret"));
+    CHECK(results.value(base + 2).ok && QFile::exists(tmp.path() + "/shop.db"));
+    CHECK_EQ(text(base + 3), QString("s3 cret\n"));
+    CHECK_EQ(text(base + 4), QString("None\n"));
+    CHECK(!results.value(base + 5).ok && text(base + 5).contains("no such table: t"));
+    results.remove(base, results.size() - base);
+
     // unicode, and a kernel that dies mid-cell
     run("python", QString::fromUtf8("print('h\xC3\xA9llo \xE2\x9C\x93')"));
     run("python", "import os; os._exit(4)");
@@ -709,6 +772,46 @@ static void test_editor_cells()
         f.ed.foldAll(false);
         CHECK_EQ(f.md(), doc);
         CHECK(f.tidy());
+    }
+
+    // the x on a cell's tag: the cell goes and what it printed goes with it; one undo brings both back
+    {
+        Typist d;
+        const QString doc = "before\n\n```python\nprint(1)\n```\n\n```output\n1\n```\n\nafter\n\n```bash\necho hi\n```\n";
+        auto head = [&](int n) { return cellHeads(d.ed.document()).value(n); };
+        d.ed.loadMarkdown(doc);
+        d.ed.deleteCell(head(0));
+        CHECK_EQ(d.md(), QString("before\n\nafter\n\n```bash\necho hi\n```\n"));
+        CHECK(d.tidy());
+        d.ed.undoStep();
+        CHECK_EQ(d.md(), doc);
+        CHECK(d.tidy());
+        d.ed.deleteCell(head(1));                                                       // the last thing in the document
+        CHECK_EQ(d.md(), QString("before\n\n```python\nprint(1)\n```\n\n```output\n1\n```\n\nafter\n"));
+        CHECK(d.tidy());
+        const QString first = "```python\nprint(1)\n```\n\n```output\n1\n```\n\n- after\n";
+        d.ed.loadMarkdown(first);                                                       // the first thing
+        d.ed.deleteCell(head(0));
+        CHECK_EQ(d.md(), QString("- after\n"));
+        CHECK(d.tidy());
+        d.ed.loadMarkdown("```python\nprint(1)\n```\n\n```output\n1\n```\n");          // all there is
+        d.ed.deleteCell(head(0));
+        CHECK_EQ(d.md(), QString());
+        d.ed.loadMarkdown("text\n\n<!--cell python\nprint(1)\n-->\n\n```output\n1\n```\n\nmore\n");    // one whose code is hidden
+        d.ed.deleteCell(head(0));
+        CHECK_EQ(d.md(), QString("text\n\nmore\n"));
+        CHECK(d.tidy());
+        d.ed.loadMarkdown("```python\nimport time\ntime.sleep(30)\n```\n\n```python\nprint(2)\n```\n");   // while it runs
+        d.ed.runAll();
+        QTest::qWait(1500);
+        d.ed.deleteCell(head(0));
+        CHECK(d.settle(15000));
+        CHECK_EQ(d.md(), QString("```python\nprint(2)\n```\n"));                         // nothing landed on its neighbour
+        // by mouse: the x is the last thing on the tag
+        d.ed.loadMarkdown(first);
+        QApplication::processEvents();
+        QTest::mouseClick(d.ed.viewport(), Qt::LeftButton, Qt::NoModifier, QPoint(d.ed.viewport()->width() - 82, 74));
+        CHECK_EQ(d.md(), QString("- after\n"));
     }
 
     // undo walks back through consistent states only, and redo returns
@@ -1246,6 +1349,138 @@ static void test_window()
     QTest::keyClick(ed, Qt::Key_0, Qt::ControlModifier);
     CHECK(qAbs(ed->theme.zoom - 1.0) < 0.01);
     CHECK_EQ(ed->toMarkdown(), want);       // zooming is not an edit
+
+    // Cell > Environment Variables: what is typed there goes to the settings, not into the document
+    QAction *variables = nullptr;
+    for (QAction *a : w.findChildren<QAction *>())
+        if (a->text().startsWith("Environment"))
+            variables = a;
+    CHECK(variables);
+    if (variables) {
+        bool shown = false;
+        QTimer::singleShot(300, [&] {
+            auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget());
+            if (!dialog)
+                return;
+            shown = true;
+            dialog->findChild<QPlainTextEdit *>()->setPlainText("JOTTER_KEY=abc");
+            dialog->accept();
+        });
+        variables->trigger();
+        CHECK(shown);
+        CHECK_EQ(QSettings().value("env").toString(), QString("JOTTER_KEY=abc"));
+        CHECK_EQ(ed->toMarkdown(), want);
+        QSettings().remove("env");
+    }
+
+    // the list of shortcuts down the left side: made from the menus, hidden and shown from View
+    auto *shortcuts = w.findChild<QDockWidget *>();
+    CHECK(shortcuts && shortcuts->isVisible());
+    if (shortcuts) {
+        auto *list = shortcuts->findChild<QTreeWidget *>();
+        CHECK(!list->findItems("Run All", Qt::MatchExactly | Qt::MatchRecursive).isEmpty());
+        CHECK(!list->findItems("Export as PDF", Qt::MatchExactly | Qt::MatchRecursive).isEmpty());
+        CHECK(list->findItems("Clear Output", Qt::MatchExactly | Qt::MatchRecursive).isEmpty());     // has no key
+        for (QAction *a : w.findChildren<QAction *>())
+            if (a->text() == "&Keyboard Shortcuts") {
+                CHECK(a->isChecked());
+                a->trigger();
+                CHECK(!shortcuts->isVisible() && !a->isChecked());
+                a->trigger();
+                CHECK(shortcuts->isVisible() && a->isChecked());
+            }
+    }
+
+#ifndef Q_OS_WIN
+    // Help > Check for Updates, against a release kept in files: an AppImage is swapped for the newer one
+    {
+        auto write = [&](const QString &name, const QByteArray &bytes) {
+            QFile f(dir.path() + "/" + name);
+            CHECK(f.open(QIODevice::WriteOnly));
+            f.write(bytes);
+        };
+        QAction *update = nullptr;
+        for (QAction *a : w.findChildren<QAction *>())
+            if (a->text().startsWith("Check for &Updates"))
+                update = a;
+        CHECK(update);
+        const QString image = dir.path() + "/Jotter.AppImage";
+        write("Jotter.AppImage", "old");
+        QFile::setPermissions(image, QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner);
+        write("new", "the new one");
+        auto release = [&](const QString &version) {
+            write("latest.json", QString("{\"tag_name\": \"v%1\", \"html_url\": \"\", \"assets\": [{\"name\": \"Jotter-x86_64.AppImage\", "
+                                         "\"browser_download_url\": \"%2\"}]}")
+                                     .arg(version, QUrl::fromLocalFile(dir.path() + "/new").toString()).toUtf8());
+        };
+        qputenv("JOTTER_UPDATE_URL", QUrl::fromLocalFile(dir.path() + "/latest.json").toString().toUtf8());
+        qputenv("APPIMAGE", image.toUtf8());
+        auto contents = [&] {
+            QFile f(image);
+            return f.open(QIODevice::ReadOnly) ? QString::fromUtf8(f.readAll()) : QString();
+        };
+        if (update) {
+            int boxes = 0;
+            QTimer answer;                          // says yes to whatever is asked, counting the boxes
+            QObject::connect(&answer, &QTimer::timeout, [&boxes] {
+                if (auto *box = qobject_cast<QMessageBox *>(QApplication::activeModalWidget())) {
+                    ++boxes;
+                    (box->button(QMessageBox::Yes) ? box->button(QMessageBox::Yes) : box->button(QMessageBox::Ok))->click();
+                }
+            });
+            answer.start(100);
+            release(JOTTER_VERSION);                // the same version: one box saying so, nothing touched
+            update->trigger();
+            CHECK_EQ(boxes, 1);
+            CHECK_EQ(contents(), QString("old"));
+            boxes = 0;
+            release("99.0");                        // a newer one: asked, fetched, swapped, told
+            update->trigger();
+            CHECK_EQ(boxes, 2);
+            CHECK_EQ(contents(), QString("the new one"));
+            CHECK(QFileInfo(image).isExecutable() && !QFile::exists(image + ".new"));
+        }
+        qunsetenv("JOTTER_UPDATE_URL");
+        qunsetenv("APPIMAGE");
+    }
+#endif
+
+    // Insert > Database: file, table, columns and their kinds become a sql cell, which is run
+    for (QAction *a : w.findChildren<QAction *>()) {
+        if (!a->text().startsWith("&Database"))
+            continue;
+        bool shown = false;
+        QTimer::singleShot(300, [&] {
+            auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget());
+            if (!dialog)
+                return;
+            shown = true;
+            CHECK_EQ(dialog->findChild<QLineEdit *>("database")->text(), QString("first.db"));
+            auto *ok = dialog->findChild<QDialogButtonBox *>()->button(QDialogButtonBox::Ok);
+            CHECK(!ok->isEnabled());
+            dialog->findChild<QLineEdit *>("table")->setText("order");
+            auto *columns = dialog->findChild<QTableWidget *>();
+            const QStringList names = {"item", "unit price", "qty", "placed"};
+            const QVector<int> kinds = {0, 2, 1, 3};
+            for (int i = 0; i < names.size(); ++i) {
+                columns->setItem(i, 0, new QTableWidgetItem(names[i]));
+                qobject_cast<QComboBox *>(columns->cellWidget(i, 1))->setCurrentIndex(kinds[i]);
+            }
+            CHECK(ok->isEnabled() && columns->rowCount() == 5);     // a free line was added
+            dialog->accept();
+        });
+        a->trigger();
+        CHECK(shown);
+        const QString cell = "```sql\n.open first.db\ncreate table if not exists \"order\" (\n    item text,\n"
+                             "    \"unit price\" real,\n    qty integer,\n    placed date\n);\nselect * from \"order\";\n```\n";
+        CHECK(ed->toMarkdown().contains(cell));
+        QElapsedTimer t;
+        t.start();
+        while (!ed->toMarkdown().contains("```output\nitem") && !ed->toMarkdown().contains("```error") && t.elapsed() < 30000)
+            QTest::qWait(50);
+        CHECK(ed->toMarkdown().contains("```output\nitem  unit price  qty  placed\n"));
+        CHECK(QFile::exists(dir.path() + "/first.db"));
+    }
     ed->document()->setModified(false);
     w.close();
 }
