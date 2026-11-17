@@ -11,7 +11,11 @@
 #include "theme.h"
 
 #include <QSet>
+#include <QStringList>
 #include <QTextEdit>
+
+class QCompleter;
+class QStringListModel;
 
 namespace jot {
 
@@ -49,6 +53,7 @@ public:
     QImage mathImage(const QString &tex, bool display, const QColor &color, int width, int height);
     QString cellState(const QTextBlock &block) const;   // "", "queued" or "running"
     void deleteCell(const QTextBlock &head);            // the cell and what it printed (the x on its tag)
+    QStringList completions();                          // what a code cell offers to finish, where the cursor is
 
     // ---- what the cursor is in (for the toolbar) ---------------------------
     Kind currentKind() const;
@@ -123,6 +128,7 @@ private:
     bool followFace();
 
     // typing
+    void typeKey(QKeyEvent *e);
     bool handleEnter(QTextCursor &c);
     bool handleBackspace(QTextCursor &c);
     bool handleDelete(QTextCursor &c);
@@ -142,6 +148,14 @@ private:
     void setFigureWidth(int pos, qreal width);
     bool toggleMarkerAt(const QPoint &viewportPos);
     void layoutPage();
+
+    // finishing what is typed in a code cell, from what the document already holds
+    struct Completion { QString text; int replaces; };  // replaces: how many characters before the cursor it stands for
+    void catalog();
+    QVector<Completion> completionsAt(const QTextCursor &c);
+    bool completionKey(QKeyEvent *e);
+    void suggest(QKeyEvent *e);
+    void complete(int row);
 
     // cells
     QRectF bandRect(const QTextBlock &first, const QTextBlock &last) const;
@@ -170,6 +184,11 @@ private:
     QTextCursor m_running;
     bool m_isRunning = false;
     QString m_lastLang = QStringLiteral("python");
+    QCompleter *m_completer = nullptr;
+    QStringListModel *m_offered = nullptr;
+    QVector<Completion> m_completions;              // what the list is showing
+    QStringList m_phrases, m_words;                 // the catalogue: whole lines and commands, single names
+    int m_catalogRevision = -1;
     int m_dragPos = -1;                             // figure being resized
     qreal m_dragStartX = 0, m_dragStartWidth = 0;
     bool m_dragCentered = false;

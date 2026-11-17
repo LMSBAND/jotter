@@ -814,6 +814,51 @@ static void test_editor_cells()
         CHECK_EQ(d.md(), QString("- after\n"));
     }
 
+    // a code cell offers to finish what is typed with what the document already holds, and nothing else
+    {
+        Typist d;
+        d.ed.loadMarkdown("Use `git push origin master` to publish.\n\n| command | what |\n| --- | --- |\n"
+                          "| git status --short | what changed |\n| docker ps | running |\n\n"
+                          "```python\nmembers = ['ann', 'bob']\nmember_count = len(members)\n```\n\n```output\ngit secret\n```\n\nend\n");
+        QTextCursor c = d.ed.textCursor();
+        c.movePosition(QTextCursor::End);
+        d.ed.setTextCursor(c);
+        d.type("gi");
+        CHECK(d.ed.completions().isEmpty());                // not in ordinary text
+        d.type("\n```bash\ngit ");
+        CHECK_EQ(d.ed.completions().join("|"), QString("git push origin master|git status --short"));   // not what a cell printed
+        d.type("s");
+        CHECK_EQ(d.ed.completions().join("|"), QString("git status --short"));
+        QTest::keyClick(&d.ed, Qt::Key_Tab);                // Tab takes the first
+        CHECK(d.md().contains("```bash\ngit status --short\n```"));
+        d.type("\necho mem");
+        CHECK_EQ(d.ed.completions().join("|"), QString("members|member_count"));        // names the document's code uses
+        QWidget *list = QApplication::activePopupWidget();  // the list itself: the second offer picked with the arrows, then Enter
+        CHECK(list);
+        if (list) {
+            QTest::keyClick(list, Qt::Key_Down);
+            QTest::keyClick(list, Qt::Key_Down);
+            QTest::keyClick(list, Qt::Key_Return);
+        }
+        CHECK(d.md().contains("```bash\ngit status --short\necho member_count\n```"));
+        CHECK(!QApplication::activePopupWidget());
+        d.type("\ndoc");
+        CHECK_EQ(d.ed.completions().join("|"), QString("docker ps"));                   // from the table
+        list = QApplication::activePopupWidget();
+        CHECK(list);
+        if (list)
+            QTest::keyClick(list, Qt::Key_Return);          // nothing picked: Enter is the new line it always is
+        CHECK(d.md().contains("echo member_count\ndoc\n\n```"));
+        CHECK(!QApplication::activePopupWidget());
+        d.type("doc");
+        list = QApplication::activePopupWidget();
+        if (list)
+            QTest::keyClick(list, Qt::Key_Escape);          // Esc puts the list away and changes nothing
+        CHECK(!QApplication::activePopupWidget());
+        CHECK(d.md().contains("echo member_count\ndoc\ndoc\n```"));
+        CHECK(d.tidy());
+    }
+
     // undo walks back through consistent states only, and redo returns
     const QString full = t.md();
     int steps = 0;

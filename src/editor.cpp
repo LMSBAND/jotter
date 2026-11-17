@@ -7,7 +7,9 @@
 
 #include <QAbstractTextDocumentLayout>
 #include <QApplication>
+#include <QAbstractItemView>
 #include <QClipboard>
+#include <QCompleter>
 #include <QDesktopServices>
 #include <QFileInfo>
 #include <QHelpEvent>
@@ -19,6 +21,7 @@
 #include <QRegularExpression>
 #include <QSaveFile>
 #include <QScrollBar>
+#include <QStringListModel>
 #include <QStyle>
 #include <QTextDocumentFragment>
 #include <QTextList>
@@ -457,6 +460,14 @@ void Editor::redoStep() { replay(false); }
 
 void Editor::keyPressEvent(QKeyEvent *e)
 {
+    if (completionKey(e))
+        return;
+    typeKey(e);
+    suggest(e);
+}
+
+void Editor::typeKey(QKeyEvent *e)
+{
     if (e->matches(QKeySequence::Undo)) {
         undoStep();
         return;
@@ -504,6 +515,192 @@ void Editor::keyPressEvent(QKeyEvent *e)
     const QString typed = e->text();
     if (typed.size() == 1 && QStringLiteral("`*$~").contains(typed))
         inlineAutoformat();
+}
+
+// ---- completion ---------------------------------------------------------------
+// A code cell offers to finish what is being typed with what the document
+// already holds: lines of its other cells, `code` in its text, what its tables
+// say, and the names its code uses. Nothing from outside the document.
+
+namespace {
+bool nameChar(QChar ch) { return ch.isLetterOrNumber() || ch == '_'; }
+}
+
+void Editor::catalog()
+{
+    if (m_catalogRevision == document()->revision())
+        return;
+    m_catalogRevision = document()->revision();
+    m_phrases.clear();
+    m_words.clear();
+    QSet<QString> seenPhrase, seenWord;
+    static const QRegularExpression name(QStringLiteral(R"([^\W\d]\w{2,})"), QRegularExpression::UseUnicodePropertiesOption);
+    auto code = [&](const QString &text) {          // a line of code: offered whole, and name by name
+        const QString line = text.trimmed();
+        if (line.size() >= 3 && line.size() <= 200 && !seenPhrase.contains(line)) {
+            seenPhrase.insert(line);
+            m_phrases.append(line);
+        }
+        auto it = name.globalMatch(line);
+        while (it.hasNext()) {
+            const QString word = it.next().captured();
+            if (!seenWord.contains(word)) {
+                seenWord.insert(word);
+                m_words.append(word);
+            }
+        }
+    };
+    for (QTextBlock b = document()->firstBlock(); b.isValid(); b = b.next()) {
+        const Kind k = kindOf(b);
+        if (k == Output) {
+            continue;
+        } else if (k == Code || k == Raw) {
+            code(b.text());
+        } else if (k == Fold) {
+            QTextCharFormat f;
+            if (objectFormat(b, ObjFold, &f))
+                for (const QString &line : f.stringProperty(PCode).split('\n'))
+                    code(line);
+        } else {
+            for (const QTextFragment &f : fragments(b))
+                if (stylesOf(f.charFormat()) & CodeSpan)
+                    code(f.text());
+            if (tableOf(b) && !b.text().contains(QChar::ObjectReplacementCharacter)) {       // a table of commands, say
+                const QString cell = b.text().trimmed();
+                if (cell.size() >= 3 && cell.size() <= 200 && !seenPhrase.contains(cell)) {
+                    seenPhrase.insert(cell);
+                    m_phrases.append(cell);
+                }
+            }
+        }
+    }
+}
+
+QVector<Editor::Completion> Editor::completionsAt(const QTextCursor &c)
+{
+    QVector<Completion> out;
+    const QTextBlock block = c.block();
+    if (c.hasSelection() || kindOf(block) != Code || tableOf(block))
+        return out;
+    const QString text = block.text();
+    const int col = c.positionInBlock();
+    if (col < text.size() && nameChar(text[col]))
+        return out;             // in the middle of a name
+    catalog();
+    QSet<QString> seen;
+    // the whole line so far, as the start of a line or command the document has
+    int lead = 0;
+    while (lead < col && text[lead].isSpace())
+        ++lead;
+    const QString line = text.mid(lead, col - lead);
+    if (col == text.size() && line.size() >= 2) {
+        for (const QString &phrase : m_phrases) {
+            if (phrase.size() > line.size() && phrase.startsWith(line, Qt::CaseInsensitive) && !seen.contains(phrase)) {
+                seen.insert(phrase);
+                out.append({phrase, int(line.size())});
+                if (out.size() == 5)
+                    break;
+            }
+        }
+    }
+    // the name being typed, as the start of a name the document's code uses
+    int start = col;
+    while (start > 0 && nameChar(text[start - 1]))
+        --start;
+    const QString word = text.mid(start, col - start);
+    if (word.size() >= 2) {
+        for (const QString &known : m_words) {
+            if (known.size() > word.size() && known.startsWith(word, Qt::CaseInsensitive) && !seen.contains(known)) {
+                seen.insert(known);
+                out.append({known, int(word.size())});
+                if (out.size() == 8)
+                    break;
+            }
+        }
+    }
+    return out;
+}
+
+QStringList Editor::completions()
+{
+    QStringList out;
+    for (const Completion &c : completionsAt(textCursor()))
+        out << c.text;
+    return out;
+}
+
+// Keys while the list is up. Tab takes the first offer (or the one picked
+// with the arrows); Enter takes one only if it was picked, and is otherwise the
+// new line it always is.
+bool Editor::completionKey(QKeyEvent *e)
+{
+    if (!m_completer || !m_completer->popup()->isVisible())
+        return false;
+    const QModelIndex picked = m_completer->popup()->currentIndex();
+    switch (e->key()) {
+    case Qt::Key_Tab:
+        m_completer->popup()->hide();
+        complete(picked.isValid() ? picked.row() : 0);
+        return true;
+    case Qt::Key_Return:
+    case Qt::Key_Enter:
+        if (picked.isValid() && e->modifiers() == Qt::NoModifier) {
+            e->ignore();        // the list takes it, and hands back the one picked
+            return true;
+        }
+        m_completer->popup()->hide();
+        return false;
+    case Qt::Key_Escape:
+        e->ignore();
+        return true;
+    default:
+        return false;
+    }
+}
+
+// After a key: show what could finish the line, or put the list away.
+void Editor::suggest(QKeyEvent *e)
+{
+    const QString typed = e->text();
+    const bool writing = e->key() == Qt::Key_Backspace
+                         || (typed.size() == 1 && typed[0].isPrint() && !(e->modifiers() & (Qt::ControlModifier | Qt::AltModifier)));
+    m_completions = writing ? completionsAt(textCursor()) : QVector<Completion>();
+    if (m_completions.isEmpty()) {
+        if (m_completer)
+            m_completer->popup()->hide();
+        return;
+    }
+    if (!m_completer) {
+        m_offered = new QStringListModel(this);
+        m_completer = new QCompleter(m_offered, this);
+        m_completer->setWidget(this);
+        m_completer->setCompletionMode(QCompleter::PopupCompletion);
+        connect(m_completer, QOverload<const QModelIndex &>::of(&QCompleter::activated), this,
+                [this](const QModelIndex &index) { complete(index.row()); });
+    }
+    QStringList texts;
+    for (const Completion &c : m_completions)
+        texts << c.text;
+    m_offered->setStringList(texts);
+    m_completer->setCompletionPrefix(QString());
+    QAbstractItemView *list = m_completer->popup();
+    list->setFont(theme.monoFont(0.9));
+    list->setCurrentIndex(QModelIndex());
+    QRect at = cursorRect();
+    at.setWidth(list->sizeHintForColumn(0) + list->verticalScrollBar()->sizeHint().width() + 16);
+    m_completer->complete(at);
+}
+
+void Editor::complete(int row)
+{
+    if (row < 0 || row >= m_completions.size())
+        return;
+    const Completion choice = m_completions[row];
+    m_completions.clear();
+    QTextCursor c = textCursor();
+    c.movePosition(QTextCursor::Left, QTextCursor::KeepAnchor, choice.replaces);
+    c.insertText(choice.text);
+    setTextCursor(c);
 }
 
 bool Editor::handleEnter(QTextCursor &c)

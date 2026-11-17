@@ -84,6 +84,12 @@ to change it; click the triangle to run; click the x to delete the cell and
 what it printed (Ctrl+Z brings both back). Paste or drop pictures straight in and
 drag a corner to resize. Tab walks table cells.
 
+While you type in a cell, a small list offers to finish the line with what the
+document already holds: lines of its other cells, `code` in its text, what its
+tables say, and names its code uses. Tab takes the first offer, the arrows and
+Enter pick another, Esc puts the list away. Nothing comes from outside the
+document.
+
 A `sql` cell runs in that same session, on SQLite. The rows a query gives back
 are printed under the cell and are `_` in the next Python cell (`_["score"]` is
 one column, `_.columns` the names), and `:name` in a query is the Python
