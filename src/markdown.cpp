@@ -9,6 +9,7 @@
 #include <QTextDocument>
 #include <QTextList>
 #include <QUrl>
+#include <algorithm>
 #include <functional>
 #include <md4c.h>
 
@@ -169,6 +170,8 @@ struct Sax {
     QString captured;
 
     bool raw = false;           // inside a code or HTML block
+    bool lines = false;         // keep where the lines of a paragraph end...
+    int nest = 0;               // ...unless it is inside a list or quote
     MdBlock rawBlock, tableBlock;
     QVector<Runs> row;
 
@@ -292,6 +295,8 @@ int enterBlock(MD_BLOCKTYPE type, void *detail, void *userdata)
 {
     Sax &s = *static_cast<Sax *>(userdata);
     s.closeImplicit();
+    if (type == MD_BLOCK_QUOTE || type == MD_BLOCK_UL || type == MD_BLOCK_OL)
+        ++s.nest;
     switch (type) {
     case MD_BLOCK_QUOTE: s.push(MdBlock::QuoteOpen); break;
     case MD_BLOCK_UL: s.push(MdBlock::ListOpen); break;
@@ -335,6 +340,8 @@ int leaveBlock(MD_BLOCKTYPE type, void *, void *userdata)
 {
     Sax &s = *static_cast<Sax *>(userdata);
     s.closeImplicit();
+    if (type == MD_BLOCK_QUOTE || type == MD_BLOCK_UL || type == MD_BLOCK_OL)
+        --s.nest;
     switch (type) {
     case MD_BLOCK_QUOTE: s.push(MdBlock::QuoteClose); break;
     case MD_BLOCK_UL:
@@ -452,7 +459,12 @@ int textEvent(MD_TEXTTYPE type, const MD_CHAR *text, MD_SIZE size, void *userdat
     s.flushHtml();
     switch (type) {
     case MD_TEXT_BR: s.addText(QString(QChar::LineSeparator)); break;
-    case MD_TEXT_SOFTBR: s.addText(QStringLiteral(" ")); break;
+    case MD_TEXT_SOFTBR:
+        if (s.lines && !s.nest && !s.cell && s.leafType == MdBlock::Paragraph)
+            s.runs.append(Run{QStringLiteral("\n"), s.styles(), s.href(), Atom()});
+        else
+            s.addText(QStringLiteral(" "));
+        break;
     case MD_TEXT_ENTITY: s.addText(decodeEntity(t)); break;
     default: s.addText(t); break;
     }
@@ -461,9 +473,10 @@ int textEvent(MD_TEXTTYPE type, const MD_CHAR *text, MD_SIZE size, void *userdat
 
 }  // namespace
 
-QVector<MdBlock> parseMarkdown(const QString &text)
+QVector<MdBlock> parseMarkdown(const QString &text, bool lines)
 {
     Sax sax;
+    sax.lines = lines;
     MD_PARSER parser = {};
     parser.flags = MD_FLAG_TABLES | MD_FLAG_STRIKETHROUGH | MD_FLAG_TASKLISTS | MD_FLAG_LATEXMATHSPANS;
     parser.enter_block = enterBlock;
@@ -490,6 +503,97 @@ QString splitFrontMatter(const QString &text, QString *body)
     }
     *body = text;
     return QString();
+}
+
+// =============================================================================
+// Screenplays: which part of one a paragraph is
+// =============================================================================
+
+namespace {
+
+QString plainOf(const Runs &runs)
+{
+    QString out;
+    for (const Run &r : runs)
+        out += r.isAtom() ? QString(QChar::ObjectReplacementCharacter) : r.text;
+    return out;
+}
+
+bool capitals(const QString &s)     // letters, and none of them small
+{
+    bool letter = false;
+    for (const QChar c : s)
+        letter = letter || c.isLetter();
+    return letter && s == s.toUpper();
+}
+
+// What a paragraph of a script is, going by its first line (more: other lines
+// come right under it). These are Fountain's rules. *mark is how many
+// characters at its start are there only to say so.
+Kind scriptKindOf(const QString &line, bool more, int *mark)
+{
+    static const RE scene(QStringLiteral(R"(^(?:INT|EXT|EST|INT\./EXT|INT/EXT|I/E)[. ])"), RE::CaseInsensitiveOption);
+    static const RE extension(QStringLiteral(R"(\s*\([^()]*\)\s*$)"));        // MARA (V.O.)
+    *mark = 1;
+    if (line.startsWith('!'))
+        return Para;
+    if (line.startsWith('@'))
+        return Character;
+    if (line.size() > 1 && line[0] == '.' && line[1] != '.')
+        return Scene;
+    *mark = 0;
+    if (scene.match(line).hasMatch())
+        return Scene;
+    if (!more && capitals(line) && line.endsWith(QLatin1String("TO:")))
+        return Transition;
+    if (more && capitals(QString(line).remove(extension)))
+        return Character;
+    return Para;
+}
+
+}  // namespace
+
+QVector<ScriptPart> scriptParts(const Runs &paragraph)
+{
+    QVector<Runs> lines(1);
+    for (const Run &r : paragraph) {
+        if (!r.isAtom() && r.text == QLatin1String("\n"))
+            lines.append(Runs());
+        else
+            lines.last().append(r);
+    }
+    int mark = 0;
+    const Kind kind = scriptKindOf(plainOf(lines[0]), lines.size() > 1, &mark);
+    if (mark && !lines[0].isEmpty()) {
+        QString &text = lines[0].first().text;
+        text.remove(0, mark);
+        while (text.startsWith(' '))
+            text.remove(0, 1);
+    }
+    QVector<ScriptPart> out;
+    int rest = 0;
+    if (kind == Character) {
+        if (!plainOf(lines[0]).trimmed().isEmpty())     // (a bare @ only says that what follows is spoken)
+            out.append({Character, lines[0]});
+        for (int i = 1; i < lines.size(); ++i) {
+            const QString said = plainOf(lines[i]).trimmed();
+            out.append({said.startsWith('(') && said.endsWith(')') ? Paren : Dialogue, lines[i]});
+        }
+        return out;
+    }
+    if (kind != Para) {         // one line; anything under it in the same paragraph is action
+        out.append({kind, lines[0]});
+        rest = 1;
+    }
+    Runs action;
+    for (int i = rest; i < lines.size(); ++i) {
+        if (i > rest)
+            action.append(Run{QString(QChar::LineSeparator), Styles(), QString(), Atom()});
+        action += lines[i];
+    }
+    if (rest < lines.size())
+        out.append({Para, action});
+    return out;
 }
 
 // =============================================================================
@@ -913,7 +1017,7 @@ QString MarkdownWriter::emitRuns(const Runs &runs, int mode, const Escape &esc) 
 }
 
 // Markdown for a block's inline content, verified to parse back to the same thing.
-QString MarkdownWriter::inlineText(Runs runs, int flags, int heading)
+QString MarkdownWriter::inlineText(Runs runs, int flags, int heading, int firstMode)
 {
     static const RE risky(QStringLiteral(R"([\\`*_\[\]<>&$~|#!\x{2028}\x{00a0}])"));
     static const RE lineRisk(QStringLiteral(R"(^\s*(?:[-+=>:]|\d+[.)]))"), RE::MultilineOption);
@@ -940,7 +1044,7 @@ QString MarkdownWriter::inlineText(Runs runs, int flags, int heading)
     // A single stray ~ or $ is harmless; two could pair up as strikethrough or math.
     Escape esc{bool(flags & OneLine), bool(flags & Cell), false, tildes >= 2, dollars >= 2 || (math && dollars)};
     QString text;
-    for (int mode = 0; mode < 3; ++mode) {
+    for (int mode = firstMode; mode < 3; ++mode) {
         modeUsed = qMax(modeUsed, mode);
         esc.everything = mode == 2;
         text = emitRuns(runs, mode, esc);
@@ -1131,10 +1235,88 @@ QString MarkdownWriter::list(const QVector<Item> &items, int &i)
     return lines.join('\n');
 }
 
+// The parts of a script from items[i] on that make one paragraph of the file:
+// a speech (who, how, what), or a scene heading, a transition or some action by
+// itself. Checked like inline text is: it is read back, and if that does not
+// give these parts again it is written once more with everything escaped.
+QString MarkdownWriter::script(const QVector<Item> &items, int &i)
+{
+    auto spoken = [](Kind k) { return k == Paren || k == Dialogue; };
+    QVector<ScriptPart> parts;
+    const Kind head = kind(items[i].block);
+    do {
+        const QTextBlock b = items[i].block;
+        Runs runs = prepared(runsOf(b));
+        const QString plain = plainOf(runs);
+        if (kind(b) == Paren && !plain.isEmpty()) {     // a parenthetical is known by its brackets
+            if (!plain.startsWith('('))
+                runs.prepend(Run{QStringLiteral("("), Styles(), QString(), Atom()});
+            if (!plain.endsWith(')'))
+                runs.append(Run{QStringLiteral(")"), Styles(), QString(), Atom()});
+        }
+        if (!runs.isEmpty())
+            parts.append({kind(b), runs});
+        ++i;
+    } while ((head == Character || spoken(head)) && i < items.size() && !items[i].table && spoken(kind(items[i].block)));
+    if (parts.isEmpty())
+        return QString();
+    if (parts.size() == 1 && parts[0].kind == Para && parts[0].runs.size() == 1 && parts[0].runs[0].isAtom())
+        return inlineText(parts[0].runs);       // a picture or formula by itself is nothing else
+
+    QVector<ScriptPart> want = parts;
+    for (ScriptPart &part : want) {
+        for (Run &r : part.runs)
+            if (r.atom.type == Atom::Image)
+                r.atom.src = fileSrc(r.atom.src);
+        part.runs = canon(part.runs);
+    }
+    auto reads = [&](const QString &text) {
+        const QVector<MdBlock> parsed = parseMarkdown(text, true);
+        QVector<ScriptPart> got;
+        if (parsed.size() == 1 && parsed[0].type == MdBlock::Paragraph)
+            got = scriptParts(parsed[0].runs);
+        else if (parsed.size() == 3 && parsed[0].type == MdBlock::QuoteOpen && parsed[1].type == MdBlock::Paragraph)
+            got = {{Transition, parsed[1].runs}};
+        if (got.size() != want.size())
+            return false;
+        for (int k = 0; k < got.size(); ++k)
+            if (got[k].kind != want[k].kind || !(canon(got[k].runs) == want[k].runs))
+                return false;
+        return true;
+    };
+    QString text;
+    for (const int mode : {0, 2}) {
+        QStringList lines;
+        if (spoken(parts[0].kind))
+            lines << QStringLiteral("@");       // spoken, by nobody
+        for (int k = 0; k < parts.size(); ++k) {
+            const ScriptPart &part = parts[k];
+            const QString line = inlineText(part.runs, part.kind == Para ? 0 : OneLine, 0, mode);
+            int mark = 0;
+            const bool more = part.kind == Character && parts.size() > 1;
+            if (spoken(part.kind) || (scriptKindOf(plainOf(part.runs), more, &mark) == part.kind && !mark))
+                lines << line;
+            else if (part.kind == Scene)
+                lines << "." + line;
+            else if (part.kind == Character)
+                lines << "@" + line;
+            else if (part.kind == Transition)
+                lines << "> " + line;
+            else
+                lines << (line.startsWith('[') ? "\\!" : "!") + line;     // ("![" would start a picture)
+        }
+        text = lines.join('\n');
+        if (reads(text))
+            break;
+    }
+    return text;
+}
+
 QString MarkdownWriter::text()
 {
     QVector<Item> items;
     collect(m_doc->rootFrame(), items);
+    const bool isScript = jot::isScript(m_doc);
     QStringList chunks;
     const int n = items.size();
     auto gather = [&](int start, const std::function<bool(const QTextBlock &)> &same, int *end) {
@@ -1243,13 +1425,19 @@ QString MarkdownWriter::text()
             add(list(items, i));
         } else {
             const Runs runs = runsOf(b);
-            if (runs.size() == 1 && runs[0].atom.type == Atom::Math && runs[0].atom.display)
+            if (runs.size() == 1 && runs[0].atom.type == Atom::Math && runs[0].atom.display) {
                 add("$$\n" + runs[0].atom.src.trimmed() + "\n$$");
-            else
+                ++i;
+            } else if (isScript || scriptKind(k)) {
+                add(script(items, i));
+            } else {
                 add(inlineText(runs));
-            ++i;
+                ++i;
+            }
         }
     }
+    if (isScript)
+        add(QString::fromLatin1(kScriptComment));
     const QString face = faceComment(faceOf(m_doc));
     if (!face.isEmpty())
         add(face);
@@ -1267,24 +1455,59 @@ QString MarkdownWriter::text()
 // Reading
 // =============================================================================
 
+const char *const kScriptComment = "<!--script-->";
+
+namespace {
+
+bool isScriptComment(const MdBlock &block)
+{
+    static const RE mark(QStringLiteral(R"(^<!--\s*script\s*-->$)"));
+    return block.type == MdBlock::HtmlBlock && mark.match(block.text.trimmed()).hasMatch();
+}
+
+// The text as blocks. A script's is read with its lines kept; whether it is
+// one is known only once it has been read. (Its comment is not content.)
+QVector<MdBlock> parsedText(QString text, bool *script)
+{
+    QVector<MdBlock> parsed = parseMarkdown(text.replace("\r\n", "\n"), *script);
+    for (const MdBlock &b : qAsConst(parsed)) {
+        if (!*script && isScriptComment(b)) {
+            *script = true;
+            parsed = parseMarkdown(text, true);
+            break;
+        }
+    }
+    parsed.erase(std::remove_if(parsed.begin(), parsed.end(), isScriptComment), parsed.end());
+    return parsed;
+}
+
+}  // namespace
+
 MarkdownReader::MarkdownReader(const QTextCursor &cursor, AssetStore *store, bool importImages)
-    : m_c(cursor), m_store(store), m_import(importImages)
+    : script(isScript(cursor.document())), m_c(cursor), m_store(store), m_import(importImages), m_parts(script)
 {
 }
 
 void MarkdownReader::read(const QString &text)
 {
-    QString t = text;
-    blocks(parseMarkdown(t.replace("\r\n", "\n")));
+    const QVector<MdBlock> parsed = parsedText(text, &script);
+    m_parts = script;       // a whole document: it is what its text says
+    blocks(parsed);
 }
 
 void MarkdownReader::insert(const QString &text)
 {
-    QString t = text;
-    const QVector<MdBlock> parsed = parseMarkdown(t.replace("\r\n", "\n"));
+    const QVector<MdBlock> parsed = parsedText(text, &script);
     if (parsed.size() == 1 && parsed[0].type == MdBlock::Paragraph) {
-        insertRuns(parsed[0].runs);
-        return;
+        const QVector<ScriptPart> parts = script ? scriptParts(parsed[0].runs) : QVector<ScriptPart>();
+        if (!script) {
+            insertRuns(parsed[0].runs);
+            return;
+        }
+        if (parts.size() == 1 && parts[0].kind == Para) {
+            insertRuns(parts[0].runs);
+            return;
+        }
     }
     if (m_c.block().length() <= 1) {
         m_fresh = true;
@@ -1398,10 +1621,17 @@ void MarkdownReader::paragraph(Runs runs)
         return;
     }
     QTextBlockFormat fmt;
-    if (!m_lists.isEmpty())
+    if (!m_lists.isEmpty()) {
         fmt.setIndent(m_lists.size());      // a further paragraph inside a list item
-    else if (m_quote)
-        fmt = blockFmt(Quote);
+    } else if (m_quote) {
+        fmt = blockFmt(m_parts ? Transition : script ? Para : Quote);   // (a quote is how a script writes a transition)
+    } else if (script) {
+        for (const ScriptPart &part : scriptParts(runs)) {
+            begin(blockFmt(m_parts ? part.kind : Para));
+            insertRuns(part.runs);
+        }
+        return;
+    }
     begin(fmt);
     insertRuns(runs);
 }
@@ -1516,9 +1746,11 @@ QString loadMarkdown(QTextDocument *doc, const QString &text, AssetStore *store,
     doc->clear();
     QTextCursor cursor(doc);
     cursor.setBlockFormat(QTextBlockFormat());
+    setScript(doc, false);
     MarkdownReader reader(cursor, store, importImages);
     reader.read(body);
     setFace(doc, reader.face);
+    setScript(doc, reader.script);
     return front;
 }
 

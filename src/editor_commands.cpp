@@ -306,10 +306,33 @@ void Editor::setBlockKind(Kind kind, int level)
         if (kind == Code && kindOf(b) != Code)
             flatten(b);
         QTextCursor bc(b);
+        const bool wasParen = kindOf(b) == Paren;
         bc.setBlockFormat(fmt);
         bc.setBlockCharFormat(QTextCharFormat());
+        // A script's parenthetical is written in its brackets; they come and go with it.
+        const QString text = b.text();
+        if (kind == Paren && !wasParen) {
+            if (!text.endsWith(')')) {
+                bc.movePosition(QTextCursor::EndOfBlock);
+                bc.insertText(QStringLiteral(")"));
+            }
+            if (!text.startsWith('(')) {
+                bc.setPosition(b.position());
+                bc.insertText(QStringLiteral("("));
+            }
+        } else if (wasParen && kind != Paren && text == "()") {
+            bc.select(QTextCursor::LineUnderCursor);
+            bc.removeSelectedText();
+        }
     }
     c.endEditBlock();
+    if (kind == Paren && !c.hasSelection()) {       // ...and are typed between
+        QTextCursor in = textCursor();
+        if (in.atBlockEnd() && in.block().text().endsWith(')')) {
+            in.movePosition(QTextCursor::Left);
+            setTextCursor(in);
+        }
+    }
     viewport()->update();
 }
 

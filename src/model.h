@@ -31,9 +31,11 @@ enum Prop {
     PCode,                                  // fold object: the hidden cell's source
     PRaw,                                   // inline text written back to Markdown verbatim (unknown HTML)
     PFace = QTextFormat::UserProperty + 30, // the document (its root frame): the text face it is set in, by name
+    PScript,                                // the document: it is a screenplay
 };
 
-enum Kind { Para, Code, Output, Raw, Fold, Rule, Quote, Heading };
+enum Kind { Para, Code, Output, Raw, Fold, Rule, Quote, Heading,
+            Scene, Character, Paren, Dialogue, Transition };    // the parts of a screenplay (its action is Para)
 
 // Inline objects: each occupies one QChar::ObjectReplacementCharacter in the text.
 enum { ObjFigure = QTextFormat::UserObject + 1, ObjMath, ObjFold };
@@ -57,6 +59,19 @@ Styles stylesOf(const QTextCharFormat &format, QString *href = nullptr);
 // in the document so that changing it is an edit like any other: it can be undone.
 QString faceOf(const QTextDocument *doc);
 void setFace(QTextDocument *doc, const QString &name);
+
+// A screenplay ("script") is a document whose paragraphs are scene headings,
+// action, who speaks, how (a parenthetical), what they say, and transitions.
+// That it is one is kept in the document, like its face, and for the same
+// reason. It is always set in Courier, sixty letters to the line: a page of
+// that is about a minute on screen.
+bool isScript(const QTextDocument *doc);
+void setScript(QTextDocument *doc, bool on);
+bool scriptKind(Kind kind);                     // one of the parts only a script has
+QString textFace(const QTextDocument *doc);     // the face its text is shown in: a script's is not its own choice
+constexpr qreal ScriptUnit = 0.624;     // em: a tenth of an inch on a script's page, which is one letter of its Courier
+constexpr qreal ScriptLine = 1.2;       // em: one line of it, and the gap between its parts
+constexpr int ScriptColumns = 60;       // letters across the page
 
 // ---- making formats -------------------------------------------------------
 QTextBlockFormat blockFmt(Kind kind = Para, int level = 0, const QString &lang = QString(), bool err = false);

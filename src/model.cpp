@@ -116,6 +116,33 @@ void setFace(QTextDocument *doc, const QString &name)
     doc->rootFrame()->setFrameFormat(format);
 }
 
+bool isScript(const QTextDocument *doc)
+{
+    return doc->rootFrame()->frameFormat().boolProperty(PScript);
+}
+
+void setScript(QTextDocument *doc, bool on)
+{
+    QTextFrameFormat format = doc->rootFrame()->frameFormat();
+    if (format.boolProperty(PScript) == on)
+        return;
+    if (on)
+        format.setProperty(PScript, true);
+    else
+        format.clearProperty(PScript);
+    doc->rootFrame()->setFrameFormat(format);
+}
+
+bool scriptKind(Kind kind)
+{
+    return kind == Scene || kind == Character || kind == Paren || kind == Dialogue || kind == Transition;
+}
+
+QString textFace(const QTextDocument *doc)
+{
+    return isScript(doc) ? QStringLiteral("Courier Prime") : faceOf(doc);
+}
+
 // ---- making formats -------------------------------------------------------
 
 QTextBlockFormat blockFmt(Kind kind, int level, const QString &lang, bool err)
@@ -386,7 +413,7 @@ struct Layout {
     }
 };
 
-Layout wanted(const QTextBlock &block, qreal em, qreal leading)
+Layout wanted(const QTextBlock &block, qreal em, qreal leading, bool script)
 {
     Layout l;
     if (tableOf(block)) {
@@ -457,12 +484,31 @@ Layout wanted(const QTextBlock &block, qreal em, qreal leading)
                 }
             }
             bottom = (tight ? 0.2 : 0.8) * em;
+        } else if (script) {    // action: lines as close as a typewriter's, one left empty after it
+            bottom = ScriptLine * em;
+            l.lineHeight = 100;
         } else {
             bottom = 0.8 * em;
         }
         break;
+    case Scene:
+    case Character:
+    case Paren:
+    case Dialogue:
+    case Transition: {
+        // (where a script's parts start and end on the line: the usual places, in tenths of an inch)
+        const Kind after = next.isValid() ? kindOf(next) : Para;
+        const bool speech = k != Scene && k != Transition && (after == Paren || after == Dialogue);
+        left = (k == Character ? 22 : k == Paren ? 16 : k == Dialogue ? 10 : 0) * ScriptUnit * em;
+        right = (k == Paren ? 19 : k == Dialogue ? 15 : 0) * ScriptUnit * em;
+        bottom = speech ? 0 : ScriptLine * em;      // who speaks, how and what are one thing
+        l.lineHeight = 100;
+        if (k == Transition)
+            l.align = Qt::AlignRight;
+        break;
     }
-    if (k == Heading || k == Quote || k == Para)
+    }
+    if (k == Heading || k == Quote || k == Para || scriptKind(k))
         l.lineHeight = qRound(l.lineHeight * leading);      // lines of the text face (the others are in the code font)
     if (hasFigure(block))
         l.lineHeight = 0;       // proportional spacing would scale with the picture's height
@@ -500,13 +546,20 @@ bool needsTail(const QTextDocument *doc)    // always keep a plain paragraph to 
     return k == Code || k == Output || k == Raw || k == Fold || k == Rule;
 }
 
+bool needsCapitals(const QTextBlock &block)     // a script writes these in capitals, however they got here
+{
+    const Kind k = kindOf(block);
+    return (k == Scene || k == Character || k == Transition) && block.text() != block.text().toUpper();
+}
+
 }  // namespace
 
 bool needsNormalize(const QTextDocument *doc, QTextBlock first, QTextBlock last, qreal em, qreal leading)
 {
     const int stop = last.blockNumber();
+    const bool script = isScript(doc);
     for (QTextBlock b = first; b.isValid() && b.blockNumber() <= stop; b = b.next())
-        if (emptyFold(b) || !(current(b) == wanted(b, em, leading)))
+        if (emptyFold(b) || needsCapitals(b) || !(current(b) == wanted(b, em, leading, script)))
             return true;
     return needsTail(doc);
 }
@@ -515,6 +568,7 @@ bool normalize(QTextDocument *doc, QTextBlock first, QTextBlock last, qreal em, 
 {
     QTextCursor cur(doc);
     bool changed = false;
+    const bool script = isScript(doc);
     auto apply = [&](const QTextBlock &b) {
         if (emptyFold(b)) {
             QTextBlockFormat f = b.blockFormat();
@@ -523,7 +577,19 @@ bool normalize(QTextDocument *doc, QTextBlock first, QTextBlock last, qreal em, 
             cur.setBlockFormat(f);
             changed = true;
         }
-        const Layout want = wanted(b, em, leading);
+        if (needsCapitals(b)) {
+            const auto pieces = fragments(b);
+            for (int i = pieces.size() - 1; i >= 0; --i) {      // last first: capitals can be longer
+                const QString text = pieces[i].text();
+                if (text == text.toUpper())
+                    continue;
+                cur.setPosition(pieces[i].position());
+                cur.setPosition(pieces[i].position() + pieces[i].length(), QTextCursor::KeepAnchor);
+                cur.insertText(text.toUpper(), pieces[i].charFormat());
+            }
+            changed = true;
+        }
+        const Layout want = wanted(b, em, leading, script);
         if (current(b) == want)
             return;
         QTextBlockFormat d;

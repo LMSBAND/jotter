@@ -21,6 +21,7 @@
 #include <QFormLayout>
 #include <QHBoxLayout>
 #include <QHeaderView>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QLabel>
@@ -48,6 +49,7 @@
 #include <QUrl>
 #include <QVBoxLayout>
 #include <QVersionNumber>
+#include <algorithm>
 #include <cstdio>
 #ifdef Q_OS_WIN
 #include <qt_windows.h>
@@ -64,6 +66,9 @@ const char *kPlot = "import numpy as np\n"
                     "plt.plot(x, np.sin(x))\n"
                     "plt.xlabel(\"x\")\n"
                     "plt.ylabel(\"sin(x)\")";
+
+// The parts of a script, in the order the Script menu and the style box list them.
+const Kind kParts[] = {Scene, Para, Character, Paren, Dialogue, Transition};
 
 QString recoveryDir()
 {
@@ -198,12 +203,13 @@ MainWindow::MainWindow()
         m_editor->loadMarkdown(blank());
     restoreGeometry(m_settings.value("geometry").toByteArray());
     if (!m_settings.contains("geometry"))
-        resize(1100, 900);
+        resize(1500, 900);      // the page with a list on either side of it
 
     connect(m_editor->document(), &QTextDocument::modificationChanged, this, &QWidget::setWindowModified);
     connect(m_editor, &QTextEdit::cursorPositionChanged, this, &MainWindow::updateState);
     connect(m_editor, &QTextEdit::currentCharFormatChanged, this, &MainWindow::updateState);
     connect(m_editor, &Editor::cellsChanged, this, &MainWindow::updateState);
+    connect(m_editor->document(), &QTextDocument::contentsChanged, this, &MainWindow::updateState);     // (Tab in a script changes what a line is)
     connect(m_editor, &Editor::faceChanged, this, &MainWindow::updateFace);
     connect(m_editor, &Editor::status, this, [this](const QString &m) { statusBar()->showMessage(m, 6000); });
     connect(m_editor, &Editor::zoomRequested, this, &MainWindow::zoomBy);
@@ -222,6 +228,15 @@ MainWindow::MainWindow()
     updateFace();
     updateWords();
     m_editor->setFocus();
+}
+
+MainWindow::~MainWindow()
+{
+    if (m_libraryLister) {      // still asking Python what it has, and nobody is left to tell
+        m_libraryLister->disconnect(this);
+        m_libraryLister->kill();
+        m_libraryLister->waitForFinished(1000);
+    }
 }
 
 // ---- menus and toolbar --------------------------------------------------------
@@ -350,7 +365,7 @@ void MainWindow::buildUi()
     for (int level = 1; level <= 3; ++level)
         add(format, tr("Heading &%1").arg(level), QString(), QKeySequence(Qt::CTRL + Qt::ALT + (Qt::Key_0 + level)),
             [ed, level] { ed->setBlockKind(Heading, level); });
-    QAction *quote = add(format, tr("&Quote"), "format-text-blockquote", QKeySequence(Qt::CTRL + Qt::SHIFT + Qt::Key_Q), [ed] { ed->setBlockKind(Quote); });
+    QAction *quote = m_quote = add(format, tr("&Quote"), "format-text-blockquote", QKeySequence(Qt::CTRL + Qt::SHIFT + Qt::Key_Q), [ed] { ed->setBlockKind(Quote); });
     add(format, tr("&Code Block"), "format-text-code", QKeySequence(), [ed] { ed->setBlockKind(Code); });
     format->addSeparator();
     m_bold = add(format, tr("&Bold"), "format-text-bold", QKeySequence::Bold, [ed] { ed->toggleStyle(Bold); });
@@ -366,6 +381,18 @@ void MainWindow::buildUi()
     add(format, tr("Clea&r Formatting"), "edit-clear", QKeySequence(Qt::CTRL + Qt::Key_Backslash), [ed] { ed->clearFormatting(); });
     for (QAction *a : {m_bold, m_italic, m_underline, m_strike, m_code, m_bullets, m_numbers, m_checks})
         a->setCheckable(true);
+
+    // A screenplay: the document as one, and what the line the cursor is on is in it.
+    m_script = menuBar()->addMenu(tr("&Script"));
+    m_scriptMode = add(m_script, tr("Script &Mode"), QString(), QKeySequence(), [this](bool on) {
+        m_editor->setScript(on);
+        m_editor->setFocus();
+    });
+    m_scriptMode->setCheckable(true);
+    m_script->addSeparator();
+    const QStringList parts = {tr("&Scene Heading"), tr("&Action"), tr("&Character"), tr("&Parenthetical"), tr("&Dialogue"), tr("&Transition")};
+    for (int i = 0; i < parts.size(); ++i)
+        add(m_script, parts[i], QString(), QKeySequence(Qt::CTRL + (Qt::Key_1 + i)), [this, i] { setPart(i); });
 
     QMenu *cells = menuBar()->addMenu(tr("&Cell"));
     QAction *run = add(cells, tr("&Run"), "media-playback-start", QKeySequence(Qt::CTRL + Qt::Key_Return), [ed] { ed->runCell(false); });
@@ -396,6 +423,7 @@ void MainWindow::buildUi()
     });
     m_spell->setCheckable(true);
     QAction *shortcuts = view->addAction(QString());        // the list down the left side (set up below)
+    QAction *libraries = view->addAction(QString());        // ...and the one down the right
     view->addSeparator();
     add(view, tr("Zoom &In"), "zoom-in", QKeySequence(), [this] { zoomBy(1); })
         ->setShortcuts({QKeySequence(Qt::CTRL + Qt::Key_Equal), QKeySequence(Qt::CTRL + Qt::Key_Plus)});
@@ -406,7 +434,7 @@ void MainWindow::buildUi()
     add(help, tr("Check for &Updates…"), QString(), QKeySequence(), [this] { checkForUpdates(); });
 
     // Editing shortcuts belong to the page: Shift+Enter in the find box must not run a cell.
-    for (QMenu *menu : {insert, format, cells}) {
+    for (QMenu *menu : {insert, format, m_script, cells}) {
         for (QAction *a : menu->actions()) {
             a->setShortcutContext(Qt::WidgetWithChildrenShortcut);
             m_editor->addAction(a);
@@ -419,11 +447,13 @@ void MainWindow::buildUi()
     bar->setMovable(false);
     bar->setToolButtonStyle(Qt::ToolButtonIconOnly);
     m_style = new QComboBox(bar);
-    m_style->addItems({tr("Body Text"), tr("Heading 1"), tr("Heading 2"), tr("Heading 3"), tr("Quote"), tr("Code")});
+    m_style->setSizeAdjustPolicy(QComboBox::AdjustToContents);
     m_style->setToolTip(tr("Paragraph style"));
     m_style->setFocusPolicy(Qt::NoFocus);
     connect(m_style, QOverload<int>::of(&QComboBox::activated), this, [this](int i) {
-        if (i == 0)
+        if (m_editor->isScript())
+            setPart(i);
+        else if (i == 0)
             m_editor->setBlockKind(Para);
         else if (i <= 3)
             m_editor->setBlockKind(Heading, i);
@@ -496,6 +526,62 @@ void MainWindow::buildUi()
     m_shortcuts->setVisible(m_settings.value("shortcuts", true).toBool());
     shortcuts->setChecked(!m_shortcuts->isHidden());
 
+    // libraries: what the Python behind the cells can import, down the right side
+    m_libraries = new QDockWidget(tr("Libraries"), this);
+    m_libraries->setObjectName("libraries");
+    m_libraries->setFeatures(QDockWidget::DockWidgetClosable);
+    m_libraries->setAllowedAreas(Qt::RightDockWidgetArea);
+    auto *side = new QWidget(m_libraries);
+    auto *sideColumn = new QVBoxLayout(side);
+    sideColumn->setContentsMargins(0, 0, 0, 0);
+    sideColumn->setSpacing(2);
+    m_libraryFind = new QLineEdit(side);
+    m_libraryFind->setPlaceholderText(tr("Find a library"));
+    m_libraryFind->setClearButtonEnabled(true);
+    m_libraryList = new QTreeWidget(side);
+    m_libraryList->setColumnCount(2);
+    m_libraryList->setHeaderHidden(true);
+    m_libraryList->setRootIsDecorated(false);
+    m_libraryList->setItemsExpandable(false);
+    m_libraryList->setIndentation(10);
+    m_libraryList->setFrameShape(QFrame::NoFrame);
+    m_libraryList->setFocusPolicy(Qt::NoFocus);
+    m_libraryList->setSelectionMode(QAbstractItemView::NoSelection);
+    m_libraryList->header()->setStretchLastSection(false);
+    m_libraryList->header()->setSectionResizeMode(0, QHeaderView::Stretch);
+    m_libraryList->header()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+    m_libraryPython = new QLabel(side);
+    m_libraryPython->setContentsMargins(6, 2, 6, 4);
+    m_libraryPython->setEnabled(false);         // quiet: it only says whose Python this is
+    sideColumn->addWidget(m_libraryFind);
+    sideColumn->addWidget(m_libraryList, 1);
+    sideColumn->addWidget(m_libraryPython);
+    m_libraries->setWidget(side);
+    addDockWidget(Qt::RightDockWidgetArea, m_libraries);
+    resizeDocks({m_libraries}, {290}, Qt::Horizontal);
+    connect(m_libraryFind, &QLineEdit::textChanged, this, [this](const QString &text) {
+        for (int g = 0; g < m_libraryList->topLevelItemCount(); ++g) {
+            QTreeWidgetItem *group = m_libraryList->topLevelItem(g);
+            for (int i = 0; i < group->childCount(); ++i)
+                group->child(i)->setHidden(!group->child(i)->text(0).contains(text.trimmed(), Qt::CaseInsensitive));
+        }
+    });
+    libraries->setText(tr("&Libraries"));
+    libraries->setCheckable(true);
+    connect(libraries, &QAction::triggered, m_libraries, &QWidget::setVisible);
+    connect(m_libraries, &QDockWidget::visibilityChanged, libraries, [this, libraries](bool visible) {
+        libraries->setChecked(!m_libraries->isHidden());
+        if (visible)
+            loadLibraries();        // as it is now: something may have been installed since
+    });
+    // A restarted Python may be another one, or have had something added to it.
+    connect(m_editor->kernel(), &Kernel::stateChanged, this, [this](const QString &state) {
+        if (state == "off" && m_libraries->isVisible())
+            loadLibraries();
+    });
+    m_libraries->setVisible(m_settings.value("libraries", true).toBool());
+    libraries->setChecked(!m_libraries->isHidden());
+
     m_kernel = new QLabel(this);
     m_words = new QLabel(this);
     statusBar()->addPermanentWidget(m_kernel);
@@ -531,7 +617,12 @@ void MainWindow::updateState()
 {
     const Kind kind = m_editor->currentKind();
     const int level = m_editor->currentHeading();
-    m_style->setCurrentIndex(kind == Heading ? qBound(1, level, 3) : kind == Quote ? 4 : (kind == Code || kind == Output || kind == Raw) ? 5 : 0);
+    if (m_editor->isScript()) {     // (a heading or a cell in a script is none of its parts: the box shows nothing)
+        const Kind *part = std::find(std::begin(kParts), std::end(kParts), kind);
+        m_style->setCurrentIndex(part == std::end(kParts) ? -1 : int(part - std::begin(kParts)));
+    }
+    else
+        m_style->setCurrentIndex(kind == Heading ? qBound(1, level, 3) : kind == Quote ? 4 : (kind == Code || kind == Output || kind == Raw) ? 5 : 0);
     m_bold->setChecked(m_editor->hasStyle(Bold));
     m_italic->setChecked(m_editor->hasStyle(Italic));
     m_underline->setChecked(m_editor->hasStyle(Underline));
@@ -699,6 +790,7 @@ void MainWindow::closeEvent(QCloseEvent *e)
     }
     m_settings.setValue("geometry", saveGeometry());
     m_settings.setValue("shortcuts", !m_shortcuts->isHidden());
+    m_settings.setValue("libraries", !m_libraries->isHidden());
     clearRecovery();
     m_editor->kernel()->shutdown();
     m_editor->store().tidy();
@@ -865,6 +957,30 @@ void MainWindow::updateFace()
     m_face->setCurrentIndex(qMax(0, m_face->findText(name)));
     for (QAction *a : m_faces->actions())
         a->setChecked(a->data().toString() == name);
+
+    // A script is always in its Courier, and has parts where other documents have styles.
+    const bool script = m_editor->isScript();
+    m_scriptMode->setChecked(script);
+    m_face->setEnabled(!script);
+    m_faces->setEnabled(!script);
+    m_quote->setEnabled(!script);
+    for (QAction *a : m_script->actions())
+        a->setEnabled(script || a == m_scriptMode);
+    const QStringList styles = script
+        ? QStringList{tr("Scene Heading"), tr("Action"), tr("Character"), tr("Parenthetical"), tr("Dialogue"), tr("Transition")}
+        : QStringList{tr("Body Text"), tr("Heading 1"), tr("Heading 2"), tr("Heading 3"), tr("Quote"), tr("Code")};
+    if (m_style->count() == 0 || m_style->itemText(0) != styles[0]) {
+        m_style->clear();
+        m_style->addItems(styles);
+    }
+    updateState();
+}
+
+// Script menu, the style box of a script: make the line(s) at the cursor that part of it.
+void MainWindow::setPart(int index)
+{
+    if (m_editor->isScript() && index >= 0 && index < 6)
+        m_editor->setBlockKind(kParts[index]);
 }
 
 QString MainWindow::blank() const
@@ -977,6 +1093,58 @@ void MainWindow::insertDatabase()
     const QString t = sqlName(table->text().trimmed());
     code += "create table if not exists " + t + " (\n" + lines.join(",\n") + "\n);\nselect * from " + t + ";";
     m_editor->insertCell(code, "sql", true);
+}
+
+// Fill the Libraries panel: ask the Python that runs the cells what it can
+// import. That takes a moment, so it happens beside the window, not in its way.
+void MainWindow::loadLibraries()
+{
+    if (m_libraryLister)
+        return;             // already asking
+    const QString python = m_editor->kernel()->python.isEmpty() ? defaultPython() : m_editor->kernel()->python;
+    auto *p = m_libraryLister = new QProcess(this);
+    p->setProcessEnvironment(pythonEnvironment(python));
+    auto done = [this, p, python] {
+        if (p != m_libraryLister)
+            return;
+        m_libraryLister = nullptr;
+        p->deleteLater();
+        const QJsonObject found = QJsonDocument::fromJson(p->readAllStandardOutput()).object();
+        m_libraryList->clear();
+        if (found.isEmpty()) {
+            m_libraryPython->setText(tr("Could not ask Python (%1).").arg(python));
+            return;
+        }
+        QFont bold = m_libraryList->font();
+        bold.setBold(true);
+        auto group = [&](const QString &title) {
+            auto *item = new QTreeWidgetItem(m_libraryList, {title});
+            item->setFirstColumnSpanned(true);
+            item->setFont(0, bold);
+            return item;
+        };
+        QTreeWidgetItem *added = group(tr("Installed"));
+        for (const QJsonValue &row : found.value("installed").toArray()) {
+            const QJsonArray r = row.toArray();
+            auto *item = new QTreeWidgetItem(added, {r.at(0).toString(), r.at(1).toString()});
+            item->setTextAlignment(1, Qt::AlignRight | Qt::AlignVCenter);
+            item->setToolTip(0, r.at(2).toString());
+            item->setToolTip(1, r.at(2).toString());
+        }
+        QTreeWidgetItem *builtin = group(tr("Comes with Python"));
+        for (const QJsonValue &name : found.value("builtin").toArray())
+            new QTreeWidgetItem(builtin, {name.toString()});
+        m_libraryList->expandAll();
+        emit m_libraryFind->textChanged(m_libraryFind->text());        // what was being looked for still is
+        m_libraryPython->setText(python == bundledPython() ? tr("Python %1, Jotter's own").arg(found.value("python").toString())
+                                                           : tr("Python %1, this computer's").arg(found.value("python").toString()));
+    };
+    connect(p, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this, done);
+    connect(p, &QProcess::errorOccurred, this, [done](QProcess::ProcessError error) {
+        if (error == QProcess::FailedToStart)
+            done();
+    });
+    p->start(python, {scriptPath("libraries_worker.py")});
 }
 
 // Help > Check for Updates: ask where releases are published whether there is

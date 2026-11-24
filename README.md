@@ -111,7 +111,10 @@ a build from source or an unpacked tarball is shown the download page. Nothing
 is asked of the network before that is chosen.
 
 The list down the left side shows every shortcut the menus have. Its close
-button or View > Keyboard Shortcuts hides it, and Jotter remembers that.
+button or View > Keyboard Shortcuts hides it, and Jotter remembers that. The
+list down the right side shows the libraries the Python behind the cells can
+`import`, with their versions: the ones installed, then the ones every Python
+comes with. Type in its box to find one; View > Libraries hides it.
 
 The font box in the toolbar (or Format > Font) sets the whole document in one of
 a few faces that are part of Jotter: Roboto, Atkinson Hyperlegible, EB Garamond,
@@ -119,6 +122,17 @@ Source Serif, Computer Modern (the LaTeX look: text and formulas then match),
 Courier Prime and Comic Relief. The choice is saved in the document and goes
 into the PDF or HTML exported from it, on any machine. A new document starts in
 the face picked last.
+
+Script > Script Mode makes the document a screenplay: Courier, sixty letters to
+the line, and paragraphs that are scene headings, action, who speaks, how (a
+parenthetical), what they say, and transitions. Enter goes on to what usually
+comes next (what is said after who says it, action after that), and Tab changes
+what an empty line is: action, who speaks, a transition, a scene heading. At the
+end of a line Tab starts the other thing: who speaks after action, a
+parenthetical after a name or a speech. `int.` or `ext.` starts a scene heading,
+names and headings are put in capitals, and a name or place that has been used
+is offered again (Tab takes it). Ctrl+1 to Ctrl+6, or the style box, make the
+line any of the six. Exported, it is laid out as a screenplay is on paper.
 
 An existing `.md` opens as a document (File > Open, or `jotter file.md`). To pull
 one into the document you are in: File > Import, or drop the file on the page
@@ -146,6 +160,21 @@ plt.plot(x, y)
 $e^{i\pi} = -1$           math, inline or $$display$$
 
 <!--font: EB Garamond-->  the font the document is set in (last line; none for the default)
+````
+
+A screenplay ends in `<!--script-->`, and is otherwise written as
+[Fountain](https://fountain.io) writes one:
+
+````
+INT. KITCHEN - NIGHT      a scene heading (.ANYTHING ELSE, with a full stop before it)
+
+Rain on the window.       action
+
+MARA                      who speaks, with what they say right under it
+(not looking up)          how
+You're late.
+
+CUT TO:                   a transition (> ANYTHING NOT ENDING IN TO:)
 ````
 
 Opening a document never runs anything; outputs are stored in the file.

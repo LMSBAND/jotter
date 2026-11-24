@@ -27,6 +27,7 @@
 #include <QTextList>
 #include <QToolTip>
 #include <QUrl>
+#include <QtMath>
 
 namespace jot {
 
@@ -49,7 +50,7 @@ bool mergeable(const QTextBlock &a, const QTextBlock &b)
 {
     if (sameRun(a, b))
         return true;
-    auto prose = [](Kind k) { return k == Para || k == Heading || k == Quote; };
+    auto prose = [](Kind k) { return k == Para || k == Heading || k == Quote || scriptKind(k); };
     return prose(kindOf(a)) && prose(kindOf(b));
 }
 
@@ -105,10 +106,14 @@ Editor::~Editor()
 
 void Editor::applyTheme()
 {
-    const QString name = faceOf(document());
-    const Face &face = faceNamed(name);
+    const Face &face = faceNamed(textFace(document()));
     theme.setFace(face);
     m_face = face.name;
+    m_script = jot::isScript(document());
+    // A script's paper is as wide as sixty of its letters and the margins (measured unzoomed, as its spacing is).
+    QFont letters = theme.bodyFont();
+    letters.setPointSizeF(theme.bodyPt() / theme.zoom);
+    m_pageWidth = m_script ? qCeil(ScriptColumns * QFontMetricsF(letters).horizontalAdvance('M')) + 2 + 2 * PageMargin : PageWidth;
     QPalette pal = palette();
     pal.setColor(QPalette::Window, theme.canvas);
     pal.setColor(QPalette::Base, theme.paper);
@@ -126,16 +131,18 @@ void Editor::applyTheme()
     viewport()->update();
 }
 
-// The document says which face it is set in; the theme has to agree. True if it
-// did not (a document was loaded, or a change of face was undone).
+// The document says which face it is set in and whether it is a script; the
+// theme has to agree. True if it did not (a document was loaded, or a change of
+// either was undone).
 bool Editor::followFace()
 {
-    const QString name = faceOf(document());
-    const Face &face = faceNamed(name);
-    if (face.name == m_face)
+    const Face &face = faceNamed(textFace(document()));
+    const bool script = jot::isScript(document());
+    if (face.name == m_face && script == m_script)
         return false;
     theme.setFace(face);
     m_face = face.name;
+    m_script = script;
     return true;
 }
 
@@ -161,11 +168,49 @@ void Editor::setFace(const QString &name)
     emit faceChanged();
 }
 
+// Making the document a script, or an ordinary one again. One step for Undo:
+// what it is, what its paragraphs are, and the spacing that follows.
+void Editor::setScript(bool on)
+{
+    QTextDocument *doc = document();
+    if (jot::isScript(doc) == on)
+        return;
+    m_normalizing = true;
+    QTextCursor cur(doc);
+    cur.beginEditBlock();
+    jot::setScript(doc, on);
+    for (QTextBlock b = doc->firstBlock(); b.isValid(); b = b.next()) {
+        const Kind k = kindOf(b);
+        Kind to = k;
+        if (!on && scriptKind(k)) {
+            to = Para;
+        } else if (on && k == Quote) {
+            to = Transition;        // which is what the file would say it is
+        } else if (on && k == Para && !b.textList() && !tableOf(b) && !QStringLiteral(".!@").contains(b.text().left(1))) {
+            const QVector<ScriptPart> parts = scriptParts(MarkdownWriter(doc).runsOf(b));
+            if (parts.size() == 1 && parts[0].kind != Character)
+                to = parts[0].kind;     // INT. KITCHEN - NIGHT was a scene heading all along
+        }
+        if (to != k) {
+            cur.setPosition(b.position());
+            cur.setBlockFormat(blockFmt(to));
+        }
+    }
+    followFace();
+    normalize(doc, doc->firstBlock(), doc->lastBlock(), theme.layoutEm(), theme.leading);
+    cur.endEditBlock();
+    m_normalizing = false;
+    m_dirtyFrom = m_dirtyTo = -1;
+    applyTheme();
+    ensureCursorVisible();
+    emit faceChanged();
+}
+
 // The viewport is the sheet of paper; the margins around it show the canvas.
 void Editor::layoutPage()
 {
     const int bar = style()->pixelMetric(QStyle::PM_ScrollBarExtent, nullptr, this);
-    const int side = qMax(0, (width() - bar - PageWidth) / 2);
+    const int side = qMax(0, (width() - bar - m_pageWidth) / 2);
     setViewportMargins(side, side ? 14 : 0, side, 0);
 }
 
@@ -321,6 +366,7 @@ bool Editor::save(const QString &path, QString *error)
 QString Editor::selectionMarkdown(const QTextCursor &cursor) const
 {
     QTextDocument tmp;
+    jot::setScript(&tmp, m_script);     // so that it is written as a script's text, and says that it is
     QTextCursor tc(&tmp);
     tc.insertFragment(cursor.selection());
     const QTextBlock first = document()->findBlock(cursor.selectionStart());
@@ -511,10 +557,23 @@ void Editor::typeKey(QKeyEvent *e)
         if (handleSpace(c))
             return;
     }
-    QTextEdit::keyPressEvent(e);
     const QString typed = e->text();
+    const Kind kind = kindOf(c.block());
+    if ((kind == Scene || kind == Character || kind == Transition) && typed != typed.toUpper()
+        && !(mods & (Qt::ControlModifier | Qt::AltModifier))) {
+        QKeyEvent capital(QEvent::KeyPress, key, e->modifiers(), typed.toUpper());      // these are written in capitals
+        QTextEdit::keyPressEvent(&capital);
+        return;
+    }
+    QTextEdit::keyPressEvent(e);
     if (typed.size() == 1 && QStringLiteral("`*$~").contains(typed))
         inlineAutoformat();
+    if (typed == "." && m_script && kind == Para) {     // int. or ext. starts a scene heading
+        static const RE place(QStringLiteral(R"(^(?:int|ext|est|int\./ext|int/ext|i/e)\.$)"), RE::CaseInsensitiveOption);
+        QTextCursor now = textCursor();
+        if (!now.block().textList() && !tableOf(now.block()) && place.match(now.block().text()).hasMatch())
+            now.setBlockFormat(blockFmt(Scene));
+    }
 }
 
 // ---- completion ---------------------------------------------------------------
@@ -580,10 +639,26 @@ QVector<Editor::Completion> Editor::completionsAt(const QTextCursor &c)
 {
     QVector<Completion> out;
     const QTextBlock block = c.block();
-    if (c.hasSelection() || kindOf(block) != Code || tableOf(block))
-        return out;
+    const Kind kind = kindOf(block);
     const QString text = block.text();
     const int col = c.positionInBlock();
+    if (!c.hasSelection() && (kind == Character || kind == Scene) && col == text.size() && col > 0) {
+        // In a script: who has spoken, or where it has been. The latest first.
+        static const QRegularExpression extension(QStringLiteral(R"(\s*\(.*$)"));
+        QSet<QString> seen;
+        for (QTextBlock b = document()->lastBlock(); b.isValid() && out.size() < 8; b = b.previous()) {
+            QString known = b.text().trimmed();
+            if (kind == Character)
+                known.remove(extension);
+            if (kindOf(b) != kind || b == block || known.size() <= text.size() || !known.startsWith(text) || seen.contains(known))
+                continue;
+            seen.insert(known);
+            out.append({known, col});
+        }
+        return out;
+    }
+    if (c.hasSelection() || kind != Code || tableOf(block))
+        return out;
     if (col < text.size() && nameChar(text[col]))
         return out;             // in the middle of a name
     catalog();
@@ -762,6 +837,12 @@ bool Editor::handleEnter(QTextCursor &c)
         return false;
     case Raw:
         return false;
+    case Scene:
+    case Character:
+    case Paren:
+    case Dialogue:
+    case Transition:
+        return scriptEnter(c);
     case Para:
         break;
     }
@@ -818,10 +899,80 @@ bool Editor::handleEnter(QTextCursor &c)
     return false;
 }
 
+// In a script Enter goes on to what usually comes next: what is said after who
+// says it, action after a scene heading or a speech, a new scene after a
+// transition. On a line with nothing on it, it is action again.
+bool Editor::scriptEnter(QTextCursor &c)
+{
+    const QTextBlock block = c.block();
+    const Kind kind = kindOf(block);
+    const QString text = block.text();
+    if (text.isEmpty() || (kind == Paren && text == "()")) {
+        c.beginEditBlock();
+        c.select(QTextCursor::LineUnderCursor);
+        c.removeSelectedText();
+        c.setBlockFormat(QTextBlockFormat());
+        c.endEditBlock();
+        return true;
+    }
+    if (kind == Paren)
+        c.movePosition(QTextCursor::EndOfBlock);    // from inside its brackets too
+    if (!c.atBlockEnd())
+        return false;
+    const Kind next = kind == Character || kind == Paren ? Dialogue : kind == Transition ? Scene : Para;
+    c.insertBlock(blockFmt(next), QTextCharFormat());
+    setTextCursor(c);
+    return true;
+}
+
+// ...and Tab changes what an empty line is: action, who speaks, a transition, a
+// scene heading, and round again; inside a speech, what is said or how. At the
+// end of a line that has something on it, Tab starts the line that Enter would
+// not: who speaks after action, how they say it after their name or their words.
+bool Editor::scriptTab(QTextCursor &c, bool back)
+{
+    const QTextBlock block = c.block();
+    const Kind kind = kindOf(block);
+    if (c.hasSelection() || block.textList() || !(kind == Para || scriptKind(kind)))
+        return false;
+    const QString text = block.text();
+    if (text.isEmpty() || (kind == Paren && text == "()")) {
+        static const Kind round[] = {Para, Character, Transition, Scene};
+        Kind to = kind == Paren ? Dialogue : Paren;
+        for (int i = 0; i < 4; ++i)
+            if (round[i] == kind)
+                to = round[(i + (back ? 3 : 1)) % 4];
+        setBlockKind(to);
+    } else if (c.atBlockEnd() || kind == Paren) {
+        const Kind to = kind == Para ? Character : kind == Transition ? Scene : kind == Scene ? Para
+            : kind == Paren ? Dialogue : Paren;
+        if (back)
+            return true;
+        c.beginEditBlock();
+        c.movePosition(QTextCursor::EndOfBlock);
+        c.insertBlock(blockFmt(to), QTextCharFormat());
+        if (to == Paren) {
+            c.insertText(QStringLiteral("()"));
+            c.movePosition(QTextCursor::Left);
+        }
+        c.endEditBlock();
+        setTextCursor(c);
+    }
+    return true;
+}
+
 bool Editor::handleBackspace(QTextCursor &c)
 {
     const QTextBlock block = c.block();
     const Kind kind = kindOf(block);
+    if (kind == Paren && block.text() == "()" && c.positionInBlock() == 1) {    // empty brackets: it is what is said, then
+        c.beginEditBlock();
+        c.select(QTextCursor::LineUnderCursor);
+        c.removeSelectedText();
+        c.setBlockFormat(blockFmt(Dialogue));
+        c.endEditBlock();
+        return true;
+    }
     if (!c.atBlockStart()) {
         if (kind == Code) {     // through indentation, back to the previous tab stop
             const int col = c.positionInBlock();
@@ -837,7 +988,7 @@ bool Editor::handleBackspace(QTextCursor &c)
     if (tableOf(block))
         return false;
     // At the start of a styled block, Backspace first takes the style away.
-    if (kind == Heading || kind == Quote || kind == Rule) {
+    if (kind == Heading || kind == Quote || kind == Rule || scriptKind(kind)) {
         c.setBlockFormat(QTextBlockFormat());
         c.setBlockCharFormat(QTextCharFormat());
         return true;
@@ -922,6 +1073,8 @@ void Editor::handleTab(QTextCursor &c, bool back)
         indentCode(c, back);
     else if (kindOf(block) == Para && block.textList())
         indentList(back ? -1 : 1);
+    else if (m_script)
+        scriptTab(c, back);
     // elsewhere Tab does nothing: leading tabs have no meaning in the saved file
 }
 
@@ -1009,7 +1162,7 @@ bool Editor::handleSpace(QTextCursor &c)
     case Head: c.setBlockFormat(blockFmt(Heading, before.size())); break;
     case Bullet: toggleList(false); break;
     case Number: toggleList(true); break;
-    case QuoteMark: c.setBlockFormat(blockFmt(Quote)); break;
+    case QuoteMark: c.setBlockFormat(blockFmt(m_script ? Transition : Quote)); break;
     }
     c.endEditBlock();
     return true;
@@ -1021,7 +1174,7 @@ void Editor::inlineAutoformat()
     QTextCursor c = textCursor();
     const QTextBlock block = c.block();
     const Kind kind = kindOf(block);
-    if (c.hasSelection() || !(kind == Para || kind == Heading || kind == Quote))
+    if (c.hasSelection() || !(kind == Para || kind == Heading || kind == Quote || scriptKind(kind)))
         return;
     struct Rule { RE rx; int delim; int style; };   // style -1: math
     static const QVector<Rule> rules = {

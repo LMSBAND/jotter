@@ -11,6 +11,8 @@ class QDockWidget;
 class QLabel;
 class QLineEdit;
 class QMenu;
+class QProcess;
+class QTreeWidget;
 
 namespace jot {
 
@@ -21,6 +23,7 @@ class MainWindow : public QMainWindow
     Q_OBJECT
 public:
     MainWindow();
+    ~MainWindow() override;
     void open(const QString &path);     // a file that does not exist yet becomes a new document with that name
     void offerRecovery();               // after a crash: bring back an unsaved, untitled document
 
@@ -57,6 +60,7 @@ private:
     void zoomBy(int steps);
     void pickFace(const QString &name);
     void updateFace();
+    void setPart(int index);
     QString blank() const;
     void insertPicture();
     void insertTable();
@@ -64,6 +68,7 @@ private:
     void insertDatabase();
     void editEnvironment();
     void checkForUpdates();
+    void loadLibraries();
 
     QString recoveryFile() const;
     void writeRecovery();
@@ -75,15 +80,19 @@ private:
     QSettings m_settings;
     QTimer m_recoveryTimer, m_wordTimer;
     QWidget *m_findBar = nullptr;
-    QDockWidget *m_shortcuts = nullptr;
+    QDockWidget *m_shortcuts = nullptr, *m_libraries = nullptr;
+    QTreeWidget *m_libraryList = nullptr;
+    QLabel *m_libraryPython = nullptr;
+    QLineEdit *m_libraryFind = nullptr;
+    QProcess *m_libraryLister = nullptr;
     QLineEdit *m_find = nullptr, *m_replace = nullptr;
     QComboBox *m_style = nullptr, *m_face = nullptr;
-    QMenu *m_faces = nullptr;
+    QMenu *m_faces = nullptr, *m_script = nullptr;
     QLabel *m_words = nullptr, *m_kernel = nullptr;
     QMenu *m_recent = nullptr;
     QAction *m_bold = nullptr, *m_italic = nullptr, *m_underline = nullptr, *m_strike = nullptr, *m_code = nullptr,
             *m_bullets = nullptr, *m_numbers = nullptr, *m_checks = nullptr, *m_stop = nullptr, *m_dark = nullptr,
-            *m_spell = nullptr, *m_hideAll = nullptr;
+            *m_spell = nullptr, *m_hideAll = nullptr, *m_quote = nullptr, *m_scriptMode = nullptr;
 };
 
 }  // namespace jot

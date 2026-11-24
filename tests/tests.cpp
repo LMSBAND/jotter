@@ -1096,6 +1096,160 @@ static void test_pdf()
     }
 }
 
+// Script mode: a screenplay's parts, as they are typed, kept in the file and exported.
+static const char *kScript = R"MD(INT. KITCHEN - NIGHT
+
+Rain on the window. MARA cooks.
+
+MARA
+(not looking up)
+You're *late*.
+
+BRYAN (O.S.)
+Traffic.
+
+.THE ROOF
+
+!INT. is how a scene heading starts.
+
+@MARA
+
+> FADE OUT.
+
+CUT TO:
+
+# Act Two
+
+@
+Said by nobody.
+
+<!--script-->
+)MD";
+
+static void test_script()
+{
+    // the file: Fountain's notation, read back as the same parts
+    QTextDocument doc;
+    const QString want = QString::fromUtf8(kScript);
+    const QString got = roundtrip(want, &doc);
+    if (got != want) {
+        ++g_failures;
+        std::fprintf(stderr, "  FAIL script round trip differs\n");
+        printDiff(want, got);
+    }
+    CHECK(isScript(&doc));
+    CHECK_EQ(textFace(&doc), QString("Courier Prime"));
+    const QVector<Kind> kinds = {Scene, Para, Character, Paren, Dialogue, Character, Dialogue, Scene, Para, Character,
+                                 Transition, Transition, Heading, Dialogue};
+    const QVector<QTextBlock> blocks = blocksOf(doc);
+    CHECK_EQ(blocks.size(), kinds.size());
+    for (int i = 0; i < qMin(blocks.size(), kinds.size()); ++i)
+        CHECK_EQ(int(kindOf(blocks[i])), int(kinds[i]));
+    CHECK_EQ(blocks.value(7).text(), QString("THE ROOF"));
+    CHECK_EQ(blocks.value(8).text(), QString("INT. is how a scene heading starts."));
+    CHECK_EQ(blocks.value(10).text(), QString("FADE OUT."));
+
+    // lines of action under one another stay lines; small letters where capitals belong become capitals
+    QTextDocument loose;
+    loadMarkdown(&loose, "He walks.\nShe runs.\n\n@mara\nhi\n\n<!--script-->\n", &store());
+    normalize(&loose, loose.firstBlock(), loose.lastBlock(), 15, 1);
+    CHECK_EQ(MarkdownWriter(&loose, &store()).text(), QString("He walks.\\\nShe runs.\n\nMARA\nhi\n\n<!--script-->\n"));
+    // ...and none of it is a script unless the file says so, or it goes into one
+    QTextDocument plain;
+    CHECK_EQ(roundtrip("MARA\nHello.\n", &plain), QString("MARA Hello.\n"));
+    CHECK(!isScript(&plain));
+    plain.clear();
+    MarkdownReader(QTextCursor(&plain)).insert("@MARA\nHi.\n\n<!--script-->\n");
+    CHECK_EQ(MarkdownWriter(&plain).text(), QString("MARA\n\nHi.\n"));
+
+    // typing: Enter goes on to what comes next, Tab changes what the line is
+    Typist t;
+    t.ed.setScript(true);
+    CHECK(t.ed.isScript());
+    t.type("int. kitchen - night\nRain.\n\tmara\nYou're late.\n\tbryan\tquietly\nTraffic.\n\t\tcut to:\next. roof - day");
+    CHECK_EQ(t.md(), QString("INT. KITCHEN - NIGHT\n\nRain.\n\nMARA\nYou're late.\n\nBRYAN\n(quietly)\nTraffic.\n\n"
+                             "CUT TO:\n\nEXT. ROOF - DAY\n\n<!--script-->\n"));
+    CHECK(t.tidy());
+    CHECK_EQ(t.ed.face(), QString("Courier Prime"));
+    {
+        // sixty letters to the line; what is said sits inside that, who says it further in
+        const QTextBlock scene = t.ed.document()->firstBlock(), who = scene.next().next(), said = who.next();
+        const qreal letter = QFontMetricsF(t.ed.theme.bodyFont()).horizontalAdvance('M');
+        const qreal width = t.ed.document()->textWidth() - 2 * t.ed.document()->documentMargin();
+        CHECK(width >= 60 * letter && width < 61 * letter);
+        CHECK(who.blockFormat().leftMargin() > said.blockFormat().leftMargin() && said.blockFormat().rightMargin() > 0);
+        CHECK_EQ(int(who.blockFormat().bottomMargin()), 0);
+        CHECK(said.blockFormat().bottomMargin() > 0);
+    }
+
+    // a name that has spoken is offered again
+    t.type("\n\tm");
+    CHECK_EQ(t.ed.completions().join('|'), QString("MARA"));
+    t.key(Qt::Key_Tab);
+    CHECK_EQ(t.ed.textCursor().block().text(), QString("MARA"));
+    t.type("\nHi.");
+    CHECK(t.md().endsWith("MARA\nHi.\n\n<!--script-->\n"));
+
+    // on paper
+    const QString html = pageHtml(t.ed.document(), t.ed.store(), "Script");
+    CHECK(html.contains("<article class=\"script\">") && html.contains("<p class=\"scene\">INT. KITCHEN - NIGHT</p>"));
+    CHECK(html.contains("<div class=\"speech\">\n<p class=\"character\">BRYAN</p>\n<p class=\"paren\">(quietly)</p>\n"
+                        "<p class=\"dialogue\">Traffic.</p>\n</div>"));
+    CHECK(html.contains("Courier Prime"));
+
+    // the window: Script > Script Mode, and the parts in the style box and under Ctrl+1 to Ctrl+6
+    {
+        MainWindow w;
+        w.resize(1100, 900);
+        w.show();
+        w.activateWindow();
+        CHECK(QTest::qWaitForWindowActive(&w));
+        auto *ed = w.findChild<Editor *>();
+        ed->setFocus();
+        QAction *mode = nullptr;
+        for (QAction *a : w.findChildren<QAction *>())
+            if (a->text() == "Script &Mode")
+                mode = a;
+        QComboBox *style = nullptr;
+        for (QComboBox *box : w.findChildren<QComboBox *>())
+            if (box->toolTip() == "Paragraph style")
+                style = box;
+        CHECK(mode && style);
+        if (mode && style) {
+            CHECK_EQ(style->itemText(0), QString("Body Text"));
+            QTest::keyClick(ed, Qt::Key_3, Qt::ControlModifier);        // not in an ordinary document
+            CHECK_EQ(int(ed->currentKind()), int(Para));
+            mode->trigger();
+            CHECK(ed->isScript() && mode->isChecked());
+            CHECK_EQ(style->itemText(0), QString("Scene Heading"));
+            CHECK_EQ(style->currentText(), QString("Action"));
+            QTest::keyClick(ed, Qt::Key_3, Qt::ControlModifier);
+            CHECK_EQ(int(ed->currentKind()), int(Character));
+            CHECK_EQ(style->currentText(), QString("Character"));
+            QTest::keyClicks(ed, "mara");
+            QTest::keyClick(ed, Qt::Key_4, Qt::ControlModifier);
+            CHECK_EQ(ed->textCursor().block().text(), QString("(MARA)"));
+            QTest::keyClick(ed, Qt::Key_Z, Qt::ControlModifier);
+            CHECK_EQ(ed->toMarkdown(), QString("@MARA\n\n<!--script-->\n"));
+            mode->trigger();
+            CHECK(!ed->isScript() && !mode->isChecked());
+            CHECK_EQ(style->itemText(0), QString("Body Text"));
+            CHECK_EQ(ed->toMarkdown(), QString("MARA\n"));
+            ed->document()->setModified(false);
+        }
+    }
+
+    // an ordinary document again, and back: each is one step
+    const QString script = t.md();
+    t.ed.setScript(false);
+    CHECK(!t.ed.isScript() && !t.md().contains("<!--script-->") && t.md().contains("MARA\n\nYou're late."));
+    CHECK(t.tidy());
+    t.ed.undoStep();
+    CHECK(t.ed.isScript());
+    CHECK_EQ(t.md(), script);
+    CHECK(t.tidy());
+}
+
 // The text face: fonts that are part of Jotter, chosen per document and kept in it.
 static void test_fonts()
 {
@@ -1419,7 +1573,7 @@ static void test_window()
     }
 
     // the list of shortcuts down the left side: made from the menus, hidden and shown from View
-    auto *shortcuts = w.findChild<QDockWidget *>();
+    auto *shortcuts = w.findChild<QDockWidget *>("shortcuts");
     CHECK(shortcuts && shortcuts->isVisible());
     if (shortcuts) {
         auto *list = shortcuts->findChild<QTreeWidget *>();
@@ -1489,6 +1643,34 @@ static void test_window()
         qunsetenv("APPIMAGE");
     }
 #endif
+
+    // the list of libraries down the right side: what this Python can import, found by typing, hidden from View
+    auto *libraries = w.findChild<QDockWidget *>("libraries");
+    CHECK(libraries && libraries->isVisible());
+    if (libraries) {
+        auto *list = libraries->findChild<QTreeWidget *>();
+        auto has = [&](const QString &name) {
+            const auto items = list->findItems(name, Qt::MatchExactly | Qt::MatchRecursive);
+            return !items.isEmpty() && !items.first()->isHidden();
+        };
+        QElapsedTimer t;
+        t.start();
+        while (!has("numpy") && t.elapsed() < 30000)
+            QTest::qWait(50);
+        CHECK(has("numpy") && has("matplotlib") && has("sqlite3") && has("math"));
+        CHECK(!list->findItems("numpy", Qt::MatchExactly | Qt::MatchRecursive).value(0)->text(1).isEmpty());   // its version
+        libraries->findChild<QLineEdit *>()->setText("SQL");
+        CHECK(has("sqlite3") && !has("numpy") && !has("math"));
+        libraries->findChild<QLineEdit *>()->clear();
+        CHECK(has("numpy"));
+        for (QAction *a : w.findChildren<QAction *>())
+            if (a->text() == "&Libraries") {
+                a->trigger();
+                CHECK(!libraries->isVisible() && !a->isChecked());
+                a->trigger();
+                CHECK(libraries->isVisible() && a->isChecked());
+            }
+    }
 
     // Insert > Database: file, table, columns and their kinds become a sql cell, which is run
     for (QAction *a : w.findChildren<QAction *>()) {
@@ -1658,6 +1840,7 @@ int main(int argc, char **argv)
         {"editor_files", test_editor_files},
         {"spelling", test_spelling},
         {"pdf", test_pdf},
+        {"script", test_script},
         {"fonts", test_fonts},
         {"window", test_window},
         {"dialogs", test_dialogs},

@@ -20,6 +20,19 @@
 //
 //     <!--font: EB Garamond-->     the face the document is set in (last line; none for the default)
 //
+// A screenplay ends in <!--script--> and its paragraphs are read the way
+// Fountain reads them, so the file is one a screenwriting program opens too:
+//
+//     INT. KITCHEN - NIGHT         a scene heading (.ANYTHING ELSE with a full stop before it)
+//
+//     Rain on the window.          action (!SOMETHING THAT LOOKS LIKE ANOTHER PART with a ! before it)
+//
+//     MARA                         who speaks: capitals, and lines right under it (otherwise @MARA)
+//     (not looking up)             how: a parenthetical
+//     You're late.                 what they say
+//
+//     CUT TO:                      a transition (> ANYTHING NOT ENDING IN TO: as a quote)
+//
 // Reading goes through md4c (CommonMark + tables, strikethrough, task lists,
 // math), so any Markdown opens. Writing checks itself: every paragraph is parsed
 // back and compared, and if the pretty form would not round-trip it is written
@@ -68,7 +81,16 @@ struct MdBlock {
     Runs runs;                      // Paragraph / Heading
     QVector<QVector<Runs>> rows;    // Table
 };
-QVector<MdBlock> parseMarkdown(const QString &text);
+// (lines: a paragraph of the text itself keeps where its lines end, as a run "\n" -- how a script is read)
+QVector<MdBlock> parseMarkdown(const QString &text, bool lines = false);
+
+// A paragraph of a script as the parts it is: a scene heading, a transition,
+// action, or a speech (who, how, what). `paragraph` is one read with lines.
+struct ScriptPart {
+    Kind kind;
+    Runs runs;
+};
+QVector<ScriptPart> scriptParts(const Runs &paragraph);
 
 // YAML front matter is kept verbatim: returns it (or ""), puts the rest in *body.
 QString splitFrontMatter(const QString &text, QString *body);
@@ -86,7 +108,7 @@ public:
 
     Runs runsOf(const QTextBlock &block) const;
     enum { OneLine = 1, Cell = 2 };      // flags: no raw line breaks / inside a table cell
-    QString inlineText(Runs runs, int flags = 0, int heading = 0);
+    QString inlineText(Runs runs, int flags = 0, int heading = 0, int mode = 0);     // mode: start at that fallback
     static Runs prepared(const Runs &runs);     // runs in the form they will read back in
 
 private:
@@ -100,6 +122,7 @@ private:
     QString emitRuns(const Runs &runs, int mode, const Escape &esc) const;
     QString table(QTextTable *t);
     QString list(const QVector<Item> &items, int &i);
+    QString script(const QVector<Item> &items, int &i);
     static QString fence(const QString &info, const QStringList &lines);
 
     const QTextDocument *m_doc;
@@ -119,6 +142,7 @@ public:
     QTextCursor cursor() const { return m_c; }
     QString baseDir;            // where relative picture paths in the text are relative to (importing a file)
     QString face;               // the text face the Markdown asked for, if it did (see loadMarkdown)
+    bool script;                // the text is a script's: it says so, or it is going into one
 
 private:
     void begin(const QTextBlockFormat &fmt);
@@ -134,6 +158,7 @@ private:
     QTextCursor m_c;
     AssetStore *m_store;
     bool m_import;              // copy foreign pictures in (pasting)
+    bool m_parts;               // the document being written into is a script: its paragraphs are a script's parts
     bool m_fresh = true;        // the cursor's block is empty and ours to use
     QVector<ListCtx> m_lists;
     bool m_itemOpen = false;
@@ -143,6 +168,7 @@ private:
 
 // The line that records a document's text face ("" for the default one, which needs none).
 QString faceComment(const QString &face);
+extern const char *const kScriptComment;        // ...and the one that says it is a script
 
 // Replace the document's content (and its text face) with Markdown's. Returns the front matter.
 QString loadMarkdown(QTextDocument *doc, const QString &text, AssetStore *store = nullptr, bool importImages = false);

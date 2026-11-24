@@ -3,6 +3,7 @@
     <file>kernel_worker.py</file>
     <file>jotter.svg</file>
     <file>export.css</file>
+    <file>libraries_worker.py</file>
     <file>mathtext_worker.py</file>
     <file>update_worker.py</file>
     <file>fonts/atkinson/AtkinsonHyperlegibleNext-Bold.ttf</file>

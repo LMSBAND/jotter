@@ -42,6 +42,8 @@ public:
     void applyTheme();
     QString face() const { return m_face; }     // the text face the document is set in, as the menu names it
     void setFace(const QString &name);          // an edit: it is saved with the document and can be undone
+    bool isScript() const { return m_script; }  // the document is a screenplay (see model.h)
+    void setScript(bool on);                    // an edit, likewise
     Renderer *renderer() const { return m_renderer; }
     Kernel *kernel() const { return m_kernel; }
 
@@ -99,7 +101,7 @@ public slots:
 signals:
     void status(const QString &message);
     void cellsChanged();                    // something started or stopped running
-    void faceChanged();                     // the document's text face is another one now
+    void faceChanged();                     // the document's text face is another one now, or it became a script (or no longer is)
     void zoomRequested(int steps);          // Ctrl+wheel
     void filesDropped(const QStringList &paths);    // Markdown/text files dropped or pasted onto the page
 
@@ -134,6 +136,8 @@ private:
     bool handleDelete(QTextCursor &c);
     void handleTab(QTextCursor &c, bool back);
     bool handleSpace(QTextCursor &c);
+    bool scriptEnter(QTextCursor &c);
+    bool scriptTab(QTextCursor &c, bool back);
     void indentCode(QTextCursor &c, bool back);
     void inlineAutoformat();
 
@@ -179,6 +183,8 @@ private:
     QHash<QString, QImage> m_mathImages;
     bool m_normalizing = false, m_replaying = false;
     QString m_face;                                 // the face the theme was last set up for
+    bool m_script = false;                          // ...and whether that was for a script
+    int m_pageWidth = PageWidth;                    // logical px of paper: narrower for a script
     int m_dirtyFrom = -1, m_dirtyTo = -1;
     QVector<QTextCursor> m_queue;                   // cells waiting to run
     QTextCursor m_running;

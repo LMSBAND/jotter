@@ -52,7 +52,7 @@ private:
     void addWord(const QString &word);
 
     Theme m_theme;
-    QTextCharFormat m_code, m_output, m_error, m_heading[7], m_quote, m_th, m_link, m_icode;
+    QTextCharFormat m_code, m_output, m_error, m_heading[7], m_quote, m_scene, m_th, m_link, m_icode;
     QHash<int, QTextCharFormat> m_tokens;
     struct Lines;
     Lines *m_lines;

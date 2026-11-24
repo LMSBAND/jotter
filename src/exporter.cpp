@@ -325,6 +325,18 @@ struct Html {
                 for (const QTextBlock &x : run())
                     out << "<p>" + inlineHtml(x) + "</p>";
                 out << "</blockquote>";
+            } else if (k == Character || k == Paren || k == Dialogue) {
+                out << "<div class=\"speech\">";      // who, how and what: kept on one page
+                do {
+                    const Kind part = kindOf(items[i].block);
+                    out << QString("<p class=\"%1\">").arg(part == Character ? "character" : part == Paren ? "paren" : "dialogue")
+                               + inlineHtml(items[i].block) + "</p>";
+                    ++i;
+                } while (i < n && !items[i].table && (kindOf(items[i].block) == Paren || kindOf(items[i].block) == Dialogue));
+                out << "</div>";
+            } else if (k == Scene || k == Transition) {
+                out << QString("<p class=\"%1\">").arg(k == Scene ? "scene" : "transition") + inlineHtml(b) + "</p>";
+                ++i;
             } else if (k == Fold) {
                 ++i;                    // hidden code stays hidden; its output follows as usual
             } else if (k == Rule) {
@@ -388,8 +400,9 @@ static QString page(const QTextDocument *doc, const AssetStore &store, const QSt
     css.open(QIODevice::ReadOnly);
     const QString body = bodyHtml(doc, store, true);
     return "<!doctype html>\n<html>\n<head>\n<meta charset=\"utf-8\">\n<title>" + title.toHtmlEscaped()
-        + "</title>\n<style>\n" + QString::fromUtf8(css.readAll()) + faceCss(faceNamed(faceOf(doc)), body) + moreCss
-        + "</style>\n</head>\n<body>\n<article>\n" + body + "\n</article>\n</body>\n</html>\n";
+        + "</title>\n<style>\n" + QString::fromUtf8(css.readAll()) + faceCss(faceNamed(textFace(doc)), body) + moreCss
+        + "</style>\n</head>\n<body>\n<article" + (isScript(doc) ? " class=\"script\"" : "") + ">\n" + body
+        + "\n</article>\n</body>\n</html>\n";
 }
 
 QString pageHtml(const QTextDocument *doc, const AssetStore &store, const QString &title)

@@ -142,6 +142,8 @@ void Renderer::setTheme(const Theme &theme)
     }
     m_quote = QTextCharFormat();
     m_quote.setForeground(th.muted);
+    m_scene = QTextCharFormat();
+    m_scene.setFontWeight(QFont::Bold);
     m_th = QTextCharFormat();
     m_th.setFontWeight(QFont::DemiBold);
     m_link = QTextCharFormat();
@@ -187,6 +189,8 @@ void Renderer::highlightBlock(const QString &text)
         scale = Theme::headingScale(level);
     } else if (kind == Quote) {
         base = &m_quote;
+    } else if (kind == Scene) {
+        base = &m_scene;
     } else if (QTextTable *table = tableOf(block)) {
         if (table->cellAt(block.position()).row() == 0)
             base = &m_th;
