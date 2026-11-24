@@ -4,6 +4,7 @@
 #include "markdown.h"
 #include "mathtex.h"
 #include "render.h"
+#include "storyboard.h"
 
 #include <QAbstractTextDocumentLayout>
 #include <QApplication>
@@ -124,6 +125,7 @@ void Editor::applyTheme()
     m_mathImages.clear();
     layoutPage();
     viewport()->update();
+    emit themeChanged();
 }
 
 // The document says which face it is set in; the theme has to agree. True if it
@@ -281,6 +283,10 @@ void Editor::loadMarkdown(const QString &text, const QString &path, bool importI
     m_normalizing = false;
     m_dirtyFrom = m_dirtyTo = -1;
     m_objects.clear();
+    m_boardJoins.clear();
+    m_boards.clear();       // (they pointed into the document that was here before)
+    syncBoards();
+    emit boardsChanged();
     if (refaced) {
         applyTheme();
         emit faceChanged();
@@ -349,6 +355,14 @@ QString Editor::selectionMarkdown(const QTextCursor &cursor) const
 
 void Editor::onContentsChange(int pos, int, int added)
 {
+    if (!m_replaying) {         // a new edit: the steps that could have been redone are gone
+        for (auto it = m_boardJoins.begin(); it != m_boardJoins.end();) {
+            if (*it >= m_undoDepth)
+                it = m_boardJoins.erase(it);
+            else
+                ++it;
+        }
+    }
     if (m_normalizing)
         return;
     m_dirtyFrom = m_dirtyFrom < 0 ? pos : qMin(m_dirtyFrom, pos);
@@ -372,11 +386,13 @@ void Editor::dirtyBlocks(QTextBlock *first, QTextBlock *last) const
 
 void Editor::onContentsChanged()
 {
+    m_undoDepth = document()->availableUndoSteps();
     if (m_normalizing || m_replaying || m_dirtyFrom < 0)
         return;
     QTextBlock first, last;
     dirtyBlocks(&first, &last);
     m_dirtyFrom = m_dirtyTo = -1;
+    tendBoards(first, last);
     normalizeRange(first, last, true);
 }
 
@@ -421,6 +437,8 @@ void Editor::replay(bool undo)
         else
             QTextEdit::redo();
         refaced = followFace() || refaced;      // a change of face went, or came back: spacing is judged by the one now in force
+        if (m_boardJoins.contains(doc->availableUndoSteps()))
+            continue;           // between an edit and what it meant for the storyboard's frames
         if (m_dirtyFrom < 0)
             break;
         QTextBlock first, last;
@@ -430,6 +448,7 @@ void Editor::replay(bool undo)
     }
     m_dirtyFrom = m_dirtyTo = -1;
     m_replaying = false;
+    syncBoards();           // the frames are the ones the document has now
     if (refaced) {
         applyTheme();
         setTextCursor(before);      // (Qt leaves the cursor where the last change was, and this one was everywhere)
@@ -455,6 +474,232 @@ void Editor::commit(QTextCursor &c)
 
 void Editor::undoStep() { replay(true); }
 void Editor::redoStep() { replay(false); }
+
+// ---- the storyboard -----------------------------------------------------------
+// A frame lives in its line's block format (see model.h), and much of what
+// happens to a line gives it a new format: making it a heading or a list item
+// drops the frame, Enter hands a copy of it to the new line. So the frames are
+// also followed from outside, each as a selection of its line's text, which Qt
+// keeps in place through every edit. After an edit the two are compared and
+// the document is put right, as part of the same undo step: a frame stays with
+// the text of its line, goes when that line is deleted, and is there only once.
+
+void Editor::syncBoards()
+{
+    QTextDocument *doc = document();
+    QVector<Tracked> now;
+    for (QTextBlock b = doc->firstBlock(); b.isValid(); b = b.next()) {
+        if (!hasBoard(b))
+            continue;
+        QTextCursor at(doc);
+        at.setPosition(b.position());
+        at.setPosition(b.position() + b.length() - 1, QTextCursor::KeepAnchor);
+        now.append({at, boardOf(b), b.blockNumber(), b.length() > 1});
+    }
+    bool same = now.size() == m_boards.size();
+    for (int i = 0; same && i < now.size(); ++i)
+        same = now[i].drawing == m_boards[i].drawing && now[i].at.anchor() == m_boards[i].at.anchor();
+    m_boards = now;
+    if (!same) {
+        viewport()->update();
+        emit boardsChanged();
+    }
+}
+
+void Editor::tendBoards(const QTextBlock &first, const QTextBlock &last)
+{
+    QTextDocument *doc = document();
+    QVector<QTextBlock> framed;         // the blocks that say they have a frame
+    const bool none = m_boards.isEmpty();       // so far: the edit can only have brought some (a paste), and only where it was
+    for (QTextBlock b = none ? first : doc->firstBlock(); b.isValid() && (!none || b.blockNumber() <= last.blockNumber()); b = b.next())
+        if (hasBoard(b))
+            framed.append(b);
+    if (none && framed.isEmpty())
+        return;
+
+    QHash<int, QString> want;           // block number -> the frame that belongs there
+    QSet<int> left;                     // blocks whose frame went with its line: what they still say is a leftover
+    auto claim = [&](const QTextBlock &b, const QString &drawing) {
+        const QTextBlock host = boardHost(b);
+        if (host.isValid() && !want.contains(host.blockNumber()))
+            want.insert(host.blockNumber(), drawing);
+    };
+    // A frame whose line still has (some of) its text is wherever that text is now.
+    for (const Tracked &t : qAsConst(m_boards))
+        if (t.hadText && t.at.anchor() != t.at.position())
+            claim(doc->findBlock(t.at.anchor()), t.drawing);
+    // One whose line has none (it had none, or it was all taken out) stays if
+    // the line is still that line: its format is as it was and it is empty or was
+    // typed into, or it is the same line of the document, emptied and restyled
+    // ("# " and a space on a line with a frame). Otherwise the line was deleted.
+    for (const Tracked &t : qAsConst(m_boards)) {
+        if (t.hadText && t.at.anchor() != t.at.position())
+            continue;
+        const int p = t.at.anchor();
+        const QTextBlock b = doc->findBlock(p);
+        const bool empty = b.length() <= 1;
+        const bool intact = hasBoard(b) && boardOf(b) == t.drawing;
+        if ((intact && (empty || p != b.position())) || (empty && b.blockNumber() == t.number))
+            claim(b, t.drawing);
+        else if (intact)
+            left.insert(b.blockNumber());
+    }
+    // Frames nobody knew: pasted ones are new, and stay. A copy next to its
+    // original is what Enter left on the new line; one inside a cell belongs on
+    // the cell's first line.
+    QVector<QTextBlock> clear;
+    for (const QTextBlock &b : qAsConst(framed)) {
+        const int n = b.blockNumber();
+        if (want.contains(n))
+            continue;
+        const QString drawing = boardOf(b);
+        const QTextBlock host = boardHost(b);
+        const bool copy = (want.contains(n - 1) && want.value(n - 1) == drawing) || (want.contains(n + 1) && want.value(n + 1) == drawing);
+        if (host != b || left.contains(n) || copy) {
+            clear.append(b);
+            if (host != b && !left.contains(n))
+                claim(b, drawing);
+        }
+    }
+
+    bool edit = !clear.isEmpty();
+    for (auto it = want.constBegin(); !edit && it != want.constEnd(); ++it) {
+        const QTextBlock b = doc->findBlockByNumber(it.key());
+        edit = !hasBoard(b) || boardOf(b) != it.value();
+    }
+    if (edit) {
+        // Part of the edit that made it necessary. Qt may keep it as an undo step
+        // of its own all the same (see replay), so note where it starts.
+        const int before = doc->availableUndoSteps();
+        m_normalizing = true;
+        QTextCursor cur(doc);
+        cur.joinPreviousEditBlock();
+        for (const QTextBlock &b : qAsConst(clear))
+            if (!want.contains(b.blockNumber()))
+                clearBoard(b);
+        for (auto it = want.constBegin(); it != want.constEnd(); ++it) {
+            const QTextBlock b = doc->findBlockByNumber(it.key());
+            if (!hasBoard(b) || boardOf(b) != it.value())
+                setBoard(b, it.value());
+        }
+        cur.endEditBlock();
+        m_normalizing = false;
+        if (doc->availableUndoSteps() > before)
+            m_boardJoins.insert(before);
+    }
+    syncBoards();
+}
+
+void Editor::changeBoard(const QTextBlock &block, const QString &drawing, bool keep)
+{
+    if (!block.isValid())
+        return;
+    m_normalizing = true;       // (nothing about the line's spacing changes)
+    if (keep)
+        setBoard(block, drawing);
+    else
+        clearBoard(block);
+    m_normalizing = false;
+    syncBoards();
+}
+
+QVector<Editor::Board> Editor::boards() const
+{
+    QVector<Board> out;
+    for (const Tracked &t : m_boards)
+        out.append({document()->findBlock(t.at.anchor()), t.drawing});
+    return out;
+}
+
+int Editor::boardAtCursor() const
+{
+    const QTextBlock host = boardHost(textCursor().block());
+    if (!hasBoard(host))
+        return -1;
+    for (int i = 0; i < m_boards.size(); ++i)
+        if (document()->findBlock(m_boards[i].at.anchor()) == host)
+            return i;
+    return -1;
+}
+
+int Editor::addBoard()
+{
+    const QTextBlock host = boardHost(textCursor().block());
+    if (!host.isValid())
+        return -1;
+    if (!hasBoard(host))
+        changeBoard(host, QString(), true);
+    return boardAtCursor();
+}
+
+void Editor::drawBoard(int index, const QString &drawing)
+{
+    if (index >= 0 && index < m_boards.size() && m_boards[index].drawing != drawing)
+        changeBoard(document()->findBlock(m_boards[index].at.anchor()), drawing, true);
+}
+
+void Editor::removeBoard(int index)
+{
+    if (index >= 0 && index < m_boards.size())
+        changeBoard(document()->findBlock(m_boards[index].at.anchor()), QString(), false);
+}
+
+void Editor::showBoardLine(int index)
+{
+    if (index < 0 || index >= m_boards.size())
+        return;
+    QTextCursor c(document());
+    c.setPosition(m_boards[index].at.anchor());
+    setTextCursor(c);
+    ensureCursorVisible();
+    setFocus();
+}
+
+// Each frame is also shown small in the page's right margin, beside its line.
+QRectF Editor::boardMark(const QTextBlock &block) const
+{
+    const QTextDocument *doc = document();
+    auto *layout = doc->documentLayout();
+    const qreal margin = doc->documentMargin(), width = 40, height = width * BoardH / BoardW;
+    return QRectF(layout->documentSize().width() - margin + (margin - width) / 2, layout->blockBoundingRect(block).top() + 2,
+                  width, height);
+}
+
+int Editor::boardMarkAt(const QPoint &viewportPos) const
+{
+    if (m_boards.isEmpty())
+        return -1;
+    const QPointF point = docPoint(viewportPos);
+    const QTextBlock near = cursorForPosition(viewportPos).block();
+    for (const QTextBlock &b : {near, near.previous()}) {       // (the picture may reach below a short line)
+        if (!hasBoard(b) || !boardMark(b).adjusted(-3, -3, 3, 3).contains(point))
+            continue;
+        for (int i = 0; i < m_boards.size(); ++i)
+            if (document()->findBlock(m_boards[i].at.anchor()) == b)
+                return i;
+    }
+    return -1;
+}
+
+void Editor::paintBoardMarks(QPainter &p, const QRectF &clip, int firstVisibleY)
+{
+    if (m_boards.isEmpty())
+        return;
+    auto *layout = document()->documentLayout();
+    QTextBlock b = cursorForPosition(QPoint(0, firstVisibleY)).block();
+    if (b.previous().isValid())
+        b = b.previous();
+    for (; b.isValid() && layout->blockBoundingRect(b).top() <= clip.bottom(); b = b.next()) {
+        if (!hasBoard(b))
+            continue;
+        const QRectF mark = boardMark(b);
+        p.setPen(QPen(theme.muted, 1));
+        p.setBrush(theme.paper);
+        p.drawRoundedRect(mark.adjusted(0.5, 0.5, -0.5, -0.5), 2, 2);
+        p.setBrush(Qt::NoBrush);
+        paintDrawing(&p, mark, parseDrawing(boardOf(b)), theme);
+    }
+}
 
 // ---- typing -----------------------------------------------------------------
 
@@ -1139,6 +1384,11 @@ void Editor::mousePressEvent(QMouseEvent *e)
 {
     if (e->button() == Qt::LeftButton) {
         const QPointF point = docPoint(e->pos());
+        const int mark = boardMarkAt(e->pos());
+        if (mark >= 0) {
+            emit boardPicked(mark);
+            return;
+        }
         QTextBlock head;
         int part = 0;
         if (tagAt(e->pos(), &head, &part)) {
@@ -1203,7 +1453,7 @@ void Editor::mouseMoveEvent(QMouseEvent *e)
     int part = 0;
     int pos = 0, type = 0;
     QRectF rect;
-    if (tagAt(e->pos(), &head, &part)) {
+    if (tagAt(e->pos(), &head, &part) || boardMarkAt(e->pos()) >= 0) {
         shape = Qt::PointingHandCursor;
     } else if (objectAt(point, &pos, &rect, &type)) {
         shape = Qt::ArrowCursor;
@@ -1515,6 +1765,7 @@ void Editor::paintEvent(QPaintEvent *e)
         const QPointF offset(horizontalScrollBar()->value(), verticalScrollBar()->value());
         p.translate(-offset);
         paintUnder(p, QRectF(e->rect()).translated(offset), e->rect().top());
+        paintBoardMarks(p, QRectF(e->rect()).translated(offset), e->rect().top());
     }
     QTextEdit::paintEvent(e);
 }

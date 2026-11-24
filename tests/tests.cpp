@@ -10,6 +10,7 @@
 #include "mathtex.h"
 #include "model.h"
 #include "render.h"
+#include "storyboard.h"
 
 #include <QApplication>
 #include <QAbstractTextDocumentLayout>
@@ -32,6 +33,8 @@
 #include <QLineEdit>
 #include <QMenu>
 #include <QMimeData>
+#include <QMouseEvent>
+#include <QToolButton>
 #include <QPainter>
 #include <QPlainTextEdit>
 #include <QClipboard>
@@ -1618,6 +1621,305 @@ static void test_dialogs()
 
 // ---- runner -----------------------------------------------------------------
 
+// The storyboard: frames that belong to lines, kept in the file, drawn in from the panel.
+static void test_storyboard()
+{
+    // every kind of line that can have a frame, written and read back byte for byte
+    const QString all = "# Title\n\n<!--storyboard k3:10,20,30,40-->\n\nA paragraph.\n\n<!--storyboard-->\n\n"
+                        "- one\n  <!--storyboard r6:1,2-->\n- two\n    1. deep\n       <!--storyboard b12:5,5,9,9 g3:0,0-->\n\n"
+                        "> quoted\n> <!--storyboard y3:640,360-->\n>\n> more\n\n"
+                        "```python\nprint(1)\n```\n\n```output\n1\n```\n\n<!--storyboard k3:1,1,2,2-->\n\n"
+                        "<!--cell python\nx = 2\n-->\n\n<!--storyboard k3:3,3-->\n\n---\n\n<!--storyboard-->\n\n"
+                        "<!--storyboard alone k6:7,7-->\n\nEnd\n";
+    {
+        Typist t;
+        t.ed.loadMarkdown(all);
+        CHECK_EQ(t.md(), all);
+        if (t.md() != all)
+            printDiff(all, t.md());
+        const auto boards = t.ed.boards();
+        CHECK_EQ(boards.size(), 9);
+        if (boards.size() == 9) {
+            CHECK_EQ(boards[0].block.text(), QString("Title"));
+            CHECK_EQ(boards[0].drawing, QString("k3:10,20,30,40"));
+            CHECK_EQ(boards[1].drawing, QString());
+            CHECK_EQ(boards[2].block.text(), QString("one"));
+            CHECK_EQ(boards[3].block.text(), QString("deep"));
+            CHECK_EQ(boards[4].block.text(), QString("quoted"));
+            CHECK_EQ(boards[5].block.text(), QString("print(1)"));
+            CHECK(kindOf(boards[6].block) == Fold && kindOf(boards[7].block) == Rule);
+            CHECK_EQ(boards[8].block.text(), QString());
+        }
+        CHECK(t.tidy());
+        // what does not read as a stroke is left out, and nothing is drawn off the sheet
+        CHECK_EQ(drawingText(parseDrawing("k3:1,2 nonsense z3:1,1 r0:1,1 b2:5 g4:900,-5,7,x k2:3,4,5,6")), QString("k3:1,2 k2:3,4,5,6"));
+        CHECK_EQ(drawingText(parseDrawing("y9:900,900")), QString("y9:640,360"));
+    }
+
+    // a frame for the cursor's line; drawing in it is an edit, one stroke to an undo
+    Typist t;
+    t.type("First\nSecond");
+    CHECK_EQ(t.ed.boardAtCursor(), -1);
+    CHECK_EQ(t.ed.addBoard(), 0);
+    CHECK_EQ(t.md(), QString("First\n\nSecond\n\n<!--storyboard-->\n"));
+    t.ed.drawBoard(0, "k3:1,2,3,4");
+    t.ed.drawBoard(0, "k3:1,2,3,4 r6:9,9");
+    CHECK_EQ(t.md(), QString("First\n\nSecond\n\n<!--storyboard k3:1,2,3,4 r6:9,9-->\n"));
+    CHECK(t.ed.document()->isModified());
+    t.ed.undoStep();
+    CHECK_EQ(t.ed.boards().value(0).drawing, QString("k3:1,2,3,4"));
+    t.ed.undoStep();
+    t.ed.undoStep();
+    CHECK_EQ(t.md(), QString("First\n\nSecond\n"));
+    CHECK_EQ(t.ed.boards().size(), 0);
+    t.ed.redoStep();
+    t.ed.redoStep();
+    t.ed.redoStep();
+    const QString second = "First\n\nSecond\n\n<!--storyboard k3:1,2,3,4 r6:9,9-->\n";
+    CHECK_EQ(t.md(), second);
+    CHECK_EQ(t.ed.boardAtCursor(), 0);
+
+    // Enter after the line, or before it: the frame stays with the line's text and is there once
+    t.type("\nThird");
+    CHECK_EQ(t.md(), second + "\nThird\n");
+    CHECK_EQ(t.ed.boards().size(), 1);
+    CHECK_EQ(t.ed.boardAtCursor(), -1);
+    QTextCursor c(t.ed.document()->findBlockByNumber(1));
+    t.ed.setTextCursor(c);
+    t.key(Qt::Key_Return);
+    CHECK_EQ(t.ed.boards().size(), 1);
+    CHECK_EQ(t.ed.boards().value(0).block.text(), QString("Second"));
+    t.ed.undoStep();
+    CHECK_EQ(t.md(), second + "\nThird\n");
+
+    // making the line something else keeps its frame, and is still one step to undo
+    c = QTextCursor(t.ed.document()->findBlockByNumber(1));
+    t.ed.setTextCursor(c);
+    t.ed.setBlockKind(Heading, 2);
+    CHECK_EQ(t.md(), QString("First\n\n## Second\n\n<!--storyboard k3:1,2,3,4 r6:9,9-->\n\nThird\n"));
+    t.ed.undoStep();
+    CHECK_EQ(t.md(), second + "\nThird\n");
+    t.ed.setTextCursor(QTextCursor(t.ed.document()->findBlockByNumber(1)));
+    t.ed.toggleList(false);
+    CHECK_EQ(t.md(), QString("First\n\n- Second\n  <!--storyboard k3:1,2,3,4 r6:9,9-->\n\nThird\n"));
+    t.ed.toggleList(false);
+    CHECK_EQ(t.md(), second + "\nThird\n");
+
+    // joined to the line above, the frame is that line's now; the whole line deleted, it goes too (and comes back)
+    t.ed.setTextCursor(QTextCursor(t.ed.document()->findBlockByNumber(1)));
+    t.key(Qt::Key_Backspace);
+    CHECK_EQ(t.md(), QString("FirstSecond\n\n<!--storyboard k3:1,2,3,4 r6:9,9-->\n\nThird\n"));
+    t.ed.undoStep();
+    CHECK_EQ(t.md(), second + "\nThird\n");
+    t.ed.redoStep();
+    CHECK_EQ(t.md(), QString("FirstSecond\n\n<!--storyboard k3:1,2,3,4 r6:9,9-->\n\nThird\n"));
+    t.ed.undoStep();
+    CHECK_EQ(t.md(), second + "\nThird\n");
+    c = QTextCursor(t.ed.document()->findBlockByNumber(1));
+    c.movePosition(QTextCursor::NextBlock, QTextCursor::KeepAnchor);
+    t.ed.setTextCursor(c);
+    t.key(Qt::Key_Delete);
+    CHECK_EQ(t.md(), QString("First\n\nThird\n"));
+    CHECK_EQ(t.ed.boards().size(), 0);
+    t.ed.undoStep();
+    CHECK_EQ(t.md(), second + "\nThird\n");
+    CHECK_EQ(t.ed.boards().size(), 1);
+
+    // cut and pasted, the line takes its frame along
+    c = QTextCursor(t.ed.document()->findBlockByNumber(1));
+    c.movePosition(QTextCursor::NextBlock, QTextCursor::KeepAnchor);
+    t.ed.setTextCursor(c);
+    t.ed.cut();
+    CHECK_EQ(t.ed.boards().size(), 0);
+    t.ed.setTextCursor(QTextCursor(t.ed.document()->firstBlock()));
+    t.ed.paste();
+    CHECK_EQ(t.md(), QString("Second\n\n<!--storyboard k3:1,2,3,4 r6:9,9-->\n\nFirst\n\nThird\n"));
+    CHECK_EQ(t.ed.boards().size(), 1);
+    CHECK(t.tidy());
+
+    // a frame on a line that is still empty stays through what is typed there, Markdown habits included
+    Typist e;
+    CHECK_EQ(e.ed.addBoard(), 0);
+    CHECK_EQ(e.md(), QString("<!--storyboard alone-->\n"));
+    e.ed.drawBoard(0, "g3:5,5");
+    e.type("# Scene one");
+    CHECK_EQ(e.md(), QString("# Scene one\n\n<!--storyboard g3:5,5-->\n"));
+    e.type("\n");
+    e.ed.addBoard();
+    e.type("- wide shot\n");
+    e.ed.addBoard();
+    e.type("close up");
+    CHECK_EQ(e.md(), QString("# Scene one\n\n<!--storyboard g3:5,5-->\n\n- wide shot\n  <!--storyboard-->\n- close up\n  <!--storyboard-->\n"));
+    CHECK_EQ(e.ed.boards().size(), 3);
+    CHECK(e.tidy());
+    Typist c2;
+    c2.type("Before\n");
+    c2.ed.addBoard();
+    c2.ed.drawBoard(0, "y3:2,2");
+    c2.type("```python\nx = 1");
+    CHECK_EQ(c2.md(), QString("Before\n\n```python\nx = 1\n```\n\n<!--storyboard y3:2,2-->\n"));
+    c2.ed.deleteCell(c2.ed.document()->findBlockByNumber(1));    // the x on a cell takes its frame with it
+    CHECK_EQ(c2.md(), QString("Before\n"));
+    CHECK_EQ(c2.ed.boards().size(), 0);
+    c2.ed.undoStep();
+    CHECK_EQ(c2.md(), QString("Before\n\n```python\nx = 1\n```\n\n<!--storyboard y3:2,2-->\n"));
+    CHECK_EQ(c2.ed.boards().size(), 1);
+    CHECK(c2.tidy());
+
+    // a cell has one frame, whichever of its lines the cursor is on, shown or hidden
+    Typist k;
+    k.ed.loadMarkdown("```python\na = 1\nb = 2\n```\n\n```output\n3\n```\n\n| h |\n| --- |\n| c |\n");
+    k.ed.setTextCursor(QTextCursor(k.ed.document()->findBlockByNumber(1)));
+    CHECK_EQ(k.ed.addBoard(), 0);
+    k.ed.drawBoard(0, "b3:8,8");
+    const QString cell = "```python\na = 1\nb = 2\n```\n\n```output\n3\n```\n\n<!--storyboard b3:8,8-->\n\n| h |\n| --- |\n| c |\n";
+    CHECK_EQ(k.md(), cell);
+    k.ed.setTextCursor(QTextCursor(k.ed.document()->findBlockByNumber(2)));
+    CHECK_EQ(k.ed.boardAtCursor(), 0);       // from its output, too
+    k.ed.setTextCursor(QTextCursor(k.ed.document()->findBlockByNumber(0)));
+    k.key(Qt::Key_End);
+    k.type("\nc = 3");
+    CHECK_EQ(k.ed.boards().size(), 1);
+    CHECK_EQ(k.ed.boards().value(0).block.blockNumber(), 0);
+    k.ed.undoStep();
+    k.ed.undoStep();
+    CHECK_EQ(k.md(), cell);
+    k.ed.toggleFold();
+    CHECK(k.md().contains("<!--cell python\na = 1\nb = 2\n-->\n\n```output\n3\n```\n\n<!--storyboard b3:8,8-->"));
+    CHECK_EQ(k.ed.boards().size(), 1);
+    k.ed.toggleFold();
+    CHECK_EQ(k.md(), cell);
+    CHECK_EQ(k.ed.boards().size(), 1);
+    QTextCursor inTable(k.ed.document());
+    inTable.movePosition(QTextCursor::End);
+    inTable.movePosition(QTextCursor::PreviousBlock);
+    while (!inTable.currentTable() && inTable.movePosition(QTextCursor::PreviousBlock)) {}
+    k.ed.setTextCursor(inTable);
+    CHECK(inTable.currentTable());
+    CHECK_EQ(k.ed.addBoard(), -1);          // not in a table
+    CHECK_EQ(k.md(), cell);
+    CHECK(k.tidy());
+
+    // the panel: shown from View, a frame from Insert, drawn in with the mouse
+    QTemporaryDir dir;
+    const QString path = dir.path() + "/board.md";
+    MainWindow w;
+    w.resize(1500, 900);
+    w.show();
+    w.activateWindow();
+    CHECK(QTest::qWaitForWindowActive(&w));
+    w.open(path);
+    auto *ed = w.findChild<Editor *>();
+    auto *dock = w.findChild<QDockWidget *>("storyboard");
+    auto *panel = w.findChild<Storyboard *>();
+    CHECK(dock && panel && !dock->isVisible());
+    if (!dock || !panel)
+        return;
+    QAction *toggle = nullptr, *frame = nullptr;
+    for (QAction *a : w.findChildren<QAction *>()) {
+        if (a->text() == "Story&board")
+            toggle = a;
+        if (a->text() == "&Storyboard Frame")
+            frame = a;
+    }
+    CHECK(toggle && frame && !toggle->isChecked());
+    if (!toggle || !frame)
+        return;
+    toggle->trigger();
+    CHECK(dock->isVisible() && toggle->isChecked());
+    toggle->trigger();
+    CHECK(!dock->isVisible() && !toggle->isChecked());
+
+    ed->setFocus();
+    QTest::keyClicks(ed, "The door opens.");
+    QTest::keyClick(ed, Qt::Key_Return);
+    QTest::keyClicks(ed, "Nobody is there.");
+    QTest::keyClick(ed, Qt::Key_F, Qt::ControlModifier | Qt::AltModifier);     // Insert > Storyboard Frame
+    QCoreApplication::processEvents();
+    CHECK(dock->isVisible() && toggle->isChecked());
+    CHECK_EQ(ed->boards().size(), 1);
+    CHECK_EQ(ed->boards().value(0).block.text(), QString("Nobody is there."));
+    CHECK(ed->hasFocus());                  // the keys stay with the page
+    CHECK(!panel->findChild<QToolButton *>("add")->isEnabled());       // this line has its frame
+
+    QWidget *sheet = panel->sheet();
+    auto mouse = [&](QEvent::Type type, const QPoint &pos) {
+        QMouseEvent event(type, pos, sheet->mapToGlobal(pos), type == QEvent::MouseMove ? Qt::NoButton : Qt::LeftButton,
+                          type == QEvent::MouseButtonRelease ? Qt::NoButton : Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(sheet, &event);
+    };
+    auto drag = [&](const QPoint &from, const QPoint &to) {
+        mouse(QEvent::MouseButtonPress, from);
+        for (int i = 1; i <= 10; ++i)
+            mouse(QEvent::MouseMove, from + (to - from) * i / 10);
+        mouse(QEvent::MouseButtonRelease, to);
+    };
+    const QRect area = panel->canvas(0);
+    CHECK(area.width() > 150 && qAbs(area.height() * 16 - area.width() * 9) <= 16);
+    drag(area.topLeft() + QPoint(20, 20), area.topLeft() + QPoint(120, 20));
+    Drawing drawn = parseDrawing(ed->boards().value(0).drawing);
+    CHECK_EQ(drawn.size(), 1);
+    CHECK(drawn.value(0).ink == 'k' && drawn.value(0).width == 6 && drawn.value(0).points.size() > 3);
+    QTest::mouseClick(panel->findChild<QToolButton *>("ink-r"), Qt::LeftButton);
+    QTest::mouseClick(panel->findChild<QToolButton *>("width-12"), Qt::LeftButton);
+    drag(area.topLeft() + QPoint(20, 80), area.topLeft() + QPoint(120, 80));
+    mouse(QEvent::MouseButtonPress, area.center());         // a dot
+    mouse(QEvent::MouseButtonRelease, area.center());
+    drawn = parseDrawing(ed->boards().value(0).drawing);
+    CHECK_EQ(drawn.size(), 3);
+    CHECK(drawn.value(1).ink == 'r' && drawn.value(1).width == 12 && drawn.value(2).points.size() == 1);
+    CHECK(w.isWindowModified());
+
+    // the eraser takes out the strokes it is dragged across; Ctrl+Z brings them back
+    QTest::mouseClick(panel->findChild<QToolButton *>("eraser"), Qt::LeftButton);
+    drag(area.topLeft() + QPoint(70, 5), area.topLeft() + QPoint(70, 40));
+    drawn = parseDrawing(ed->boards().value(0).drawing);
+    CHECK_EQ(drawn.size(), 2);
+    CHECK(drawn.value(0).ink == 'r');
+    QTest::keyClick(ed, Qt::Key_Z, Qt::ControlModifier);
+    CHECK_EQ(parseDrawing(ed->boards().value(0).drawing).size(), 3);
+
+    // a second frame; a click on the text above a frame goes to its line
+    QTextCursor top(ed->document()->firstBlock());
+    ed->setTextCursor(top);
+    CHECK(panel->findChild<QToolButton *>("add")->isEnabled());
+    QTest::mouseClick(panel->findChild<QToolButton *>("add"), Qt::LeftButton);
+    QCoreApplication::processEvents();
+    CHECK_EQ(ed->boards().size(), 2);
+    CHECK_EQ(panel->current(), 0);
+    mouse(QEvent::MouseButtonPress, panel->caption(1).center());
+    CHECK_EQ(ed->textCursor().block().text(), QString("Nobody is there."));
+    CHECK_EQ(panel->current(), 1);
+
+    // saved with the document, and there when it is opened again
+    QTest::keyClick(ed, Qt::Key_S, Qt::ControlModifier);
+    QFile f(path);
+    CHECK(f.open(QIODevice::ReadOnly));
+    const QString saved = QString::fromUtf8(f.readAll());
+    f.close();
+    CHECK(saved.startsWith("The door opens.\n\n<!--storyboard-->\n\nNobody is there.\n\n<!--storyboard k6:"));
+    CHECK(!w.isWindowModified());
+    w.open(path);
+    CHECK_EQ(ed->boards().size(), 2);
+    CHECK_EQ(ed->toMarkdown(), saved);
+
+    // the small picture in the page's margin brings the panel back; the x takes a frame away
+    dock->hide();
+    const QTextBlock line = ed->boards().value(1).block;
+    const QRectF where = ed->document()->documentLayout()->blockBoundingRect(line);
+    const QPoint mark(qRound(ed->document()->documentLayout()->documentSize().width() - PageMargin / 2.0),
+                      qRound(where.top()) + 10 - ed->verticalScrollBar()->value());
+    QTest::mouseClick(ed->viewport(), Qt::LeftButton, Qt::NoModifier, mark);
+    CHECK(dock->isVisible());
+    QCoreApplication::processEvents();
+    mouse(QEvent::MouseButtonPress, panel->closeBox(0).center());
+    CHECK_EQ(ed->boards().size(), 1);
+    CHECK(ed->toMarkdown().startsWith("The door opens.\n\nNobody is there.\n\n<!--storyboard k6:"));
+    ed->undoStep();
+    CHECK_EQ(ed->toMarkdown(), saved);
+    ed->document()->setModified(false);     // (nothing to ask about when the window closes)
+}
+
 int main(int argc, char **argv)
 {
     QTemporaryDir home;         // tests never touch the real settings, caches or recovery files
@@ -1661,6 +1963,7 @@ int main(int argc, char **argv)
         {"fonts", test_fonts},
         {"window", test_window},
         {"dialogs", test_dialogs},
+        {"storyboard", test_storyboard},
     };
     int ran = 0;
     for (const auto &t : tests) {

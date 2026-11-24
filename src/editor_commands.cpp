@@ -835,19 +835,26 @@ void Editor::foldCell(QTextCursor &c, int start)
     const QTextBlock head = document()->findBlock(start);
     QString info, code;
     cellSource(head, &info, &code);
+    const bool framed = hasBoard(head);         // its storyboard frame is the cell's, shown or hidden
+    const QString drawing = boardOf(head);
+    auto format = [&](QTextBlockFormat f) {
+        if (framed)
+            f.setProperty(PBoard, drawing);
+        return f;
+    };
     if (kindOf(head) == Code) {
         const QTextBlock tail = cellTail(head);
         c.setPosition(start);
         c.setPosition(tail.position() + tail.length() - 1, QTextCursor::KeepAnchor);
         c.removeSelectedText();
-        c.setBlockFormat(blockFmt(Fold));
+        c.setBlockFormat(format(blockFmt(Fold)));
         c.setBlockCharFormat(QTextCharFormat());
         c.insertText(QString(QChar::ObjectReplacementCharacter), foldFmt(info, code));
     } else if (kindOf(head) == Fold) {
         c.setPosition(start);
         c.movePosition(QTextCursor::EndOfBlock, QTextCursor::KeepAnchor);
         c.removeSelectedText();
-        c.setBlockFormat(blockFmt(Code, 0, info));
+        c.setBlockFormat(format(blockFmt(Code, 0, info)));
         c.setBlockCharFormat(QTextCharFormat());
         c.insertText(code, QTextCharFormat());
     }

@@ -4,6 +4,7 @@
 #include "exporter.h"
 #include "markdown.h"
 #include "render.h"
+#include "storyboard.h"
 
 #include <QAbstractItemView>
 #include <QActionGroup>
@@ -329,6 +330,7 @@ void MainWindow::buildUi()
     QAction *link = add(insert, tr("&Link…"), "insert-link", QKeySequence(Qt::CTRL + Qt::Key_K), [ed] { ed->editLink(); });
     add(insert, tr("&Database…"), "server-database", QKeySequence(), [this] { insertDatabase(); });
     add(insert, tr("Horizontal &Rule"), "insert-horizontal-rule", QKeySequence(), [ed] { ed->insertRule(); });
+    add(insert, tr("&Storyboard Frame"), QString(), QKeySequence(Qt::CTRL + Qt::ALT + Qt::Key_F), [this] { addFrame(); });
     insert->addSeparator();
     add(insert, tr("Paragraph &Below"), QString(), QKeySequence(Qt::ALT + Qt::Key_Return), [ed] { ed->paragraphBelow(); });
 
@@ -503,6 +505,49 @@ void MainWindow::buildUi()
     connect(m_editor->kernel(), &Kernel::stateChanged, this, [this](const QString &state) {
         m_kernel->setText(state == "busy" ? tr("Python: running…") : state == "idle" ? tr("Python: ready") : QString());
     });
+    addStoryboard(view);
+}
+
+// The storyboard: frames to doodle in, one for each line that has one, down the
+// right side. View > Storyboard shows it; so does a click on a frame's small
+// picture in the page's margin.
+void MainWindow::addStoryboard(QMenu *view)
+{
+    m_board = new QDockWidget(tr("Storyboard"), this);
+    m_board->setObjectName("storyboard");
+    m_board->setFeatures(QDockWidget::DockWidgetClosable);
+    m_board->setAllowedAreas(Qt::RightDockWidgetArea);
+    m_storyboard = new Storyboard(m_editor, m_board);
+    m_board->setWidget(m_storyboard);
+    addDockWidget(Qt::RightDockWidgetArea, m_board);
+    resizeDocks({m_board}, {m_storyboard->sizeHint().width()}, Qt::Horizontal);
+    auto *show = new QAction(tr("Story&board"), this);
+    show->setCheckable(true);
+    QAction *below = nullptr;       // with the other panels: above the line that sets the zoom apart
+    for (QAction *a : view->actions()) {
+        if (a->isSeparator()) {
+            below = a;
+            break;
+        }
+    }
+    view->insertAction(below, show);
+    connect(show, &QAction::triggered, m_board, &QWidget::setVisible);
+    connect(m_board, &QDockWidget::visibilityChanged, show, [this, show] { show->setChecked(!m_board->isHidden()); });
+    m_board->setVisible(m_settings.value("storyboard", false).toBool());
+    show->setChecked(!m_board->isHidden());
+    connect(m_editor, &Editor::boardPicked, this, [this](int frame) {
+        m_board->show();
+        m_storyboard->reveal(frame);
+    });
+}
+
+// Insert > Storyboard Frame: the line the cursor is on gets a frame, and the storyboard is shown.
+void MainWindow::addFrame()
+{
+    m_board->show();
+    m_storyboard->addFrame();
+    if (m_editor->boardAtCursor() < 0)
+        statusBar()->showMessage(tr("A line of a table cannot have a storyboard frame."), 4000);
 }
 
 void MainWindow::applySettings()
@@ -697,6 +742,7 @@ void MainWindow::closeEvent(QCloseEvent *e)
         e->ignore();
         return;
     }
+    m_settings.setValue("storyboard", !m_board->isHidden());
     m_settings.setValue("geometry", saveGeometry());
     m_settings.setValue("shortcuts", !m_shortcuts->isHidden());
     clearRecovery();

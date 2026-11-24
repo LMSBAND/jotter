@@ -71,6 +71,7 @@ Type. Markdown habits work as you go: `# ` heading, `- ` list, `1. ` numbered,
 | Ctrl+. | stop |
 | Alt+Enter | new paragraph below the cell or table you are in |
 | Ctrl+Alt+C / Ctrl+Alt+P | new code cell / new plot |
+| Ctrl+Alt+F | a storyboard frame for the line you are on |
 | Ctrl+Shift+H | hide or show a cell's code (its output stays) |
 | Hide All Code (toolbar) | hide every cell's code at once; click again to bring it back |
 | Ctrl+M | formula (LaTeX) |
@@ -120,6 +121,18 @@ Courier Prime and Comic Relief. The choice is saved in the document and goes
 into the PDF or HTML exported from it, on any machine. A new document starts in
 the face picked last.
 
+View > Storyboard opens a strip of frames down the right side, to sketch in
+beside the writing. A frame belongs to a line: put the cursor on the line and
+press Add Frame (or Ctrl+Alt+F), then doodle in it with the mouse. There are
+five inks, three widths, and an eraser that takes out the strokes it touches;
+each stroke is one step for Ctrl+Z. A frame stays with its line while the text
+around it changes, travels with the line when that is cut and pasted, and goes
+when the line is deleted or the frame's x is clicked. The page shows every
+frame small in its right margin, beside its line; a click there brings the
+frame up, and a click on the text above a frame goes to its line. A whole cell
+has one frame, and a table has none. The drawings are saved in the document;
+they are not in what is exported.
+
 An existing `.md` opens as a document (File > Open, or `jotter file.md`). To pull
 one into the document you are in: File > Import, or drop the file on the page
 (dropped on an empty window, it opens instead).
@@ -145,6 +158,11 @@ plt.plot(x, y)
 
 $e^{i\pi} = -1$           math, inline or $$display$$
 
+<!--storyboard k6:120,80,131,92 r3:300,200-->
+                          the storyboard frame of the line above it. One word a
+                          stroke: ink (k the paper's own, r, b, g, y) and width,
+                          then the x,y it went through on a 640 by 360 sheet
+
 <!--font: EB Garamond-->  the font the document is set in (last line; none for the default)
 ````
 
@@ -160,6 +178,7 @@ Opening a document never runs anything; outputs are stored in the file.
 | `src/editor_commands.cpp` | what menus and shortcuts do; running cells |
 | `src/render.*` | theme, syntax colours (KSyntaxHighlighting), spelling (hunspell) |
 | `src/objects.*` | figures, formulas and hidden cells inside the text |
+| `src/storyboard.*` | the storyboard panel: frames to draw in, the pens |
 | `src/kernel.*`, `data/kernel_worker.py` | running cells; the Python session |
 | `src/mathtex.*`, `data/mathtext_worker.py` | formulas to images: LaTeX, or matplotlib where there is none |
 | `src/exporter.*`, `src/pdfhelper.cpp` | HTML and PDF export |

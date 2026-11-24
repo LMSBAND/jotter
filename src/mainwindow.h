@@ -15,6 +15,7 @@ class QMenu;
 namespace jot {
 
 class Editor;
+class Storyboard;
 
 class MainWindow : public QMainWindow
 {
@@ -29,6 +30,8 @@ protected:
 
 private:
     void buildUi();
+    void addStoryboard(QMenu *view);
+    void addFrame();
     void applySettings();
     void updateTitle();
     void updateState();
@@ -84,6 +87,8 @@ private:
     QAction *m_bold = nullptr, *m_italic = nullptr, *m_underline = nullptr, *m_strike = nullptr, *m_code = nullptr,
             *m_bullets = nullptr, *m_numbers = nullptr, *m_checks = nullptr, *m_stop = nullptr, *m_dark = nullptr,
             *m_spell = nullptr, *m_hideAll = nullptr;
+    QDockWidget *m_board = nullptr;         // the storyboard, down the right side
+    Storyboard *m_storyboard = nullptr;
 };
 
 }  // namespace jot

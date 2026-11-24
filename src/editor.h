@@ -55,6 +55,15 @@ public:
     void deleteCell(const QTextBlock &head);            // the cell and what it printed (the x on its tag)
     QStringList completions();                          // what a code cell offers to finish, where the cursor is
 
+    // ---- the storyboard: frames to doodle in, each belonging to a line ------
+    struct Board { QTextBlock block; QString drawing; };
+    QVector<Board> boards() const;                      // in the order of their lines
+    int boardAtCursor() const;                          // which of them is for the line the cursor is on, or -1
+    int addBoard();                                     // a frame for that line (if it has none); which one it is, or -1 in a table
+    void drawBoard(int index, const QString &drawing);  // what is drawn in a frame, replaced
+    void removeBoard(int index);
+    void showBoardLine(int index);                      // put the cursor on a frame's line
+
     // ---- what the cursor is in (for the toolbar) ---------------------------
     Kind currentKind() const;
     int currentHeading() const;
@@ -102,6 +111,9 @@ signals:
     void faceChanged();                     // the document's text face is another one now
     void zoomRequested(int steps);          // Ctrl+wheel
     void filesDropped(const QStringList &paths);    // Markdown/text files dropped or pasted onto the page
+    void themeChanged();                    // colours, fonts or zoom
+    void boardsChanged();                   // a storyboard frame came, went, moved or was drawn in
+    void boardPicked(int index);            // a frame's small picture in the page's margin was clicked
 
 protected:
     bool event(QEvent *e) override;
@@ -126,6 +138,15 @@ private:
     void normalizeRange(const QTextBlock &first, const QTextBlock &last, bool join);
     void replay(bool undo);
     bool followFace();
+
+    // the storyboard
+    struct Tracked { QTextCursor at; QString drawing; int number; bool hadText; };  // a frame; its line's text (selected), and number
+    void tendBoards(const QTextBlock &first, const QTextBlock &last);
+    void syncBoards();
+    void changeBoard(const QTextBlock &block, const QString &drawing, bool keep);
+    QRectF boardMark(const QTextBlock &block) const;
+    int boardMarkAt(const QPoint &viewportPos) const;
+    void paintBoardMarks(QPainter &p, const QRectF &clip, int firstVisibleY);
 
     // typing
     void typeKey(QKeyEvent *e);
@@ -180,6 +201,9 @@ private:
     bool m_normalizing = false, m_replaying = false;
     QString m_face;                                 // the face the theme was last set up for
     int m_dirtyFrom = -1, m_dirtyTo = -1;
+    QVector<Tracked> m_boards;                      // the storyboard's frames as of the last edit, in document order
+    QSet<int> m_boardJoins;                         // undo depths where an edit is done but its frames are not yet put right
+    int m_undoDepth = 0;                            // how many steps could be undone after the last change
     QVector<QTextCursor> m_queue;                   // cells waiting to run
     QTextCursor m_running;
     bool m_isRunning = false;
