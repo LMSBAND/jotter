@@ -1189,6 +1189,11 @@ QString MarkdownWriter::table(QTextTable *t)
     return rows.join('\n');
 }
 
+QString MarkdownWriter::board(const QTextBlock &b, bool alone)
+{
+    return hasBoard(b) ? boardComment(boardOf(b), alone) : QString();
+}
+
 // One list region. Markdown can't keep two same-type lists apart, so adjacent
 // ones are written (and numbered) as the single list they will read back as.
 QString MarkdownWriter::list(const QVector<Item> &items, int &i)
@@ -1206,6 +1211,11 @@ QString MarkdownWriter::list(const QVector<Item> &items, int &i)
         if (!lst) {                 // a further paragraph inside an item
             if (!text.isEmpty())
                 lines << QString() << QString(4 * indent, ' ') + text;
+            if (hasBoard(b)) {
+                if (text.isEmpty())
+                    lines << QString();
+                lines << QString(4 * indent, ' ') + board(b, text.isEmpty());
+            }
             ++i;
             continue;
         }
@@ -1230,6 +1240,8 @@ QString MarkdownWriter::list(const QVector<Item> &items, int &i)
         const QString box = marker == QTextBlockFormat::MarkerType::Checked ? "[x] "
             : marker == QTextBlockFormat::MarkerType::Unchecked ? "[ ] " : "";
         lines << QString(4 * (level - 1), ' ') + mark + box + text;
+        if (hasBoard(b))            // inside the item, so that the list goes on after it
+            lines << QString(4 * (level - 1) + mark.size(), ' ') + board(b);
         ++i;
     }
     return lines.join('\n');
@@ -1341,6 +1353,7 @@ QString MarkdownWriter::text()
         }
         const QTextBlock b = items[i].block;
         const Kind k = kind(b);
+        const int before = chunks.size();
         if (k == Code) {
             const QString l = lang(b);
             QStringList lines;
@@ -1419,6 +1432,8 @@ QString MarkdownWriter::text()
                 const QString t = inlineText(runsOf(x), OneLine);
                 if (!t.isEmpty())
                     paras << "> " + t;
+                if (hasBoard(x))        // on the next line of the same paragraph of the quote
+                    paras << (t.isEmpty() ? QString() : paras.takeLast() + "\n") + "> " + board(x, t.isEmpty());
             }
             add(paras.join("\n>\n"));
         } else if (b.textList()) {
@@ -1435,6 +1450,14 @@ QString MarkdownWriter::text()
                 ++i;
             }
         }
+        // The line's storyboard frame comes after it: a cell's after all of the
+        // cell, with what it printed. (The items of a list and the paragraphs of
+        // a quote have written theirs among their own lines.)
+        const bool cell = (k == Code || k == Fold) && i < n && !items[i].table && kind(items[i].block) == Output;
+        if (k == Output)
+            add(board(boardHost(b)));
+        else if (!cell && k != Quote && !(k == Para && b.textList()))
+            add(board(b, chunks.size() == before));
     }
     if (isScript)
         add(QString::fromLatin1(kScriptComment));
@@ -1659,10 +1682,16 @@ void MarkdownReader::html(const QString &content)
     static const RE img(QStringLiteral(R"(^<img\b([^>]*?)/?>\s*$)"),
                         RE::DotMatchesEverythingOption | RE::CaseInsensitiveOption);
     static const RE font(QStringLiteral(R"(^<!--\s*font:([^\n]*?)-->$)"));
+    static const RE frame(QStringLiteral(R"(^<!--\s*storyboard\b(\s+alone\b)?([^>]*?)-->$)"));
     const QString s = content.trimmed();
     auto m = font.match(s);
     if (m.hasMatch() && faceNamed(m.captured(1)).builtIn()) {
         face = faceNamed(m.captured(1)).name;       // not content: how all of it looks
+        return;
+    }
+    m = frame.match(s);
+    if (m.hasMatch()) {
+        board(m.captured(2), !m.captured(1).isEmpty());
         return;
     }
     m = cell.match(s);
@@ -1679,6 +1708,16 @@ void MarkdownReader::html(const QString &content)
         return;
     }
     lines(blockFmt(Raw), s);
+}
+
+// A storyboard frame: it goes with the line read just before it.
+void MarkdownReader::board(const QString &drawing, bool alone)
+{
+    if (alone || m_fresh || m_itemOpen)     // its line is an empty one (or there is none yet)
+        paragraph(Runs());
+    const QTextBlock host = boardHost(m_c.block());
+    if (host.isValid())
+        setBoard(host, drawingText(parseDrawing(drawing)));
 }
 
 void MarkdownReader::table(const MdBlock &block)
@@ -1737,6 +1776,12 @@ QString faceComment(const QString &face)
 {
     const Face &known = faceNamed(face);
     return known.builtIn() ? "<!--font: " + known.name + "-->" : QString();
+}
+
+QString boardComment(const QString &drawing, bool alone)
+{
+    const QString said = (QString(alone ? " alone" : "") + " " + drawing).trimmed();
+    return said.isEmpty() ? QStringLiteral("<!--storyboard-->") : "<!--storyboard " + said + "-->";
 }
 
 QString loadMarkdown(QTextDocument *doc, const QString &text, AssetStore *store, bool importImages)

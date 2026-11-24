@@ -8,6 +8,7 @@
 // structure.
 #pragma once
 
+#include <QPoint>
 #include <QTextBlock>
 #include <QTextCharFormat>
 #include <QTextCursor>
@@ -23,6 +24,7 @@ enum Prop {
     PErr,                                   // output block: this is an error/traceback
     PCell,                                  // code block: which cell a line belongs to, so that two cells
                                             // of the same language can sit next to each other
+    PBoard,                                 // block: this line has a storyboard frame; what is drawn in it (see Stroke)
     PSrc = QTextFormat::UserProperty + 10,  // figure: "asset:name", a path relative to the document, or a URL
     PWidth,                                 // figure: display width in logical px (0 = natural)
     PAlt,                                   // figure: alt text
@@ -97,6 +99,36 @@ void cellSource(const QTextBlock &head, QString *info, QString *code);
 bool cellOutputs(const QTextBlock &head, QTextBlock *first, QTextBlock *last);
 QTextBlock cellEnd(const QTextBlock &head);     // last block of the cell including its output
 QVector<QTextBlock> cellHeads(const QTextDocument *doc);
+
+// ---- the storyboard ----------------------------------------------------------
+// A line can have a frame of the storyboard: a small sheet to doodle on, shown
+// beside the page. The frame is kept in the line's block format, as text, so
+// drawing in it is an edit like any other: it is saved with the document and
+// can be undone.
+//
+// The text is one word per stroke of the pen: the pen (a letter for its colour,
+// then its width), a colon, and the points it went through on a sheet BoardW
+// wide and BoardH high:
+//     k3:12,30,14,32,20,41 r6:300,200
+constexpr int BoardW = 640, BoardH = 360;
+constexpr char BoardInks[] = "krbgy";           // the paper's own ink (dark on light, light on dark), red, blue, green, yellow
+struct Stroke {
+    QChar ink = QLatin1Char('k');
+    int width = 3;
+    QVector<QPoint> points;
+    bool operator==(const Stroke &o) const { return ink == o.ink && width == o.width && points == o.points; }
+};
+using Drawing = QVector<Stroke>;
+Drawing parseDrawing(const QString &text);      // whatever does not read as a stroke is left out
+QString drawingText(const Drawing &drawing);
+
+bool hasBoard(const QTextBlock &block);
+QString boardOf(const QTextBlock &block);
+// The block that holds the frame for the line `block` is part of: the line
+// itself, or the first line of the cell (or run) it is in. None in a table.
+QTextBlock boardHost(const QTextBlock &block);
+void setBoard(const QTextBlock &block, const QString &drawing);
+void clearBoard(const QTextBlock &block);
 
 // ---- spacing --------------------------------------------------------------
 // Margins depend on neighbours (the first line of a code block carries the

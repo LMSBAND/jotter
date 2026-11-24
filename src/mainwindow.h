@@ -17,6 +17,7 @@ class QTreeWidget;
 namespace jot {
 
 class Editor;
+class Storyboard;
 
 class MainWindow : public QMainWindow
 {
@@ -32,6 +33,8 @@ protected:
 
 private:
     void buildUi();
+    void addStoryboard(QMenu *view);
+    void addFrame();
     void applySettings();
     void updateTitle();
     void updateState();
@@ -76,6 +79,8 @@ private:
     bool restoreFrom(const QString &file, const QString &path);
 
     Editor *m_editor = nullptr;
+    Storyboard *m_storyboard = nullptr;     // frames to doodle in, down the right side...
+    QDockWidget *m_board = nullptr;         // ...and the panel it is in
     QString m_path;
     QSettings m_settings;
     QTimer m_recoveryTimer, m_wordTimer;

@@ -398,6 +398,83 @@ QVector<QTextBlock> cellHeads(const QTextDocument *doc)
     return heads;
 }
 
+// ---- the storyboard ----------------------------------------------------------
+
+Drawing parseDrawing(const QString &text)
+{
+    Drawing drawing;
+    for (const QString &word : text.split(QLatin1Char(' '), Qt::SkipEmptyParts)) {
+        const int colon = word.indexOf(QLatin1Char(':'));
+        if (colon < 2 || !QLatin1String(BoardInks).contains(word[0]))
+            continue;
+        bool ok = false;
+        Stroke stroke;
+        stroke.ink = word[0];
+        stroke.width = word.mid(1, colon - 1).toInt(&ok);
+        if (!ok || stroke.width < 1 || stroke.width > 99)
+            continue;
+        const QStringList numbers = word.mid(colon + 1).split(QLatin1Char(','));
+        for (int i = 0; ok && i + 1 < numbers.size(); i += 2) {
+            bool okX = false, okY = false;
+            const int x = numbers[i].toInt(&okX), y = numbers[i + 1].toInt(&okY);
+            ok = okX && okY;
+            stroke.points.append(QPoint(qBound(0, x, BoardW), qBound(0, y, BoardH)));
+        }
+        if (ok && numbers.size() % 2 == 0 && !stroke.points.isEmpty())
+            drawing.append(stroke);
+    }
+    return drawing;
+}
+
+QString drawingText(const Drawing &drawing)
+{
+    QStringList words;
+    for (const Stroke &stroke : drawing) {
+        QStringList numbers;
+        for (const QPoint &p : stroke.points)
+            numbers << QString::number(p.x()) << QString::number(p.y());
+        if (!numbers.isEmpty())
+            words << stroke.ink + QString::number(stroke.width) + QLatin1Char(':') + numbers.join(QLatin1Char(','));
+    }
+    return words.join(QLatin1Char(' '));
+}
+
+bool hasBoard(const QTextBlock &block)
+{
+    return block.isValid() && block.blockFormat().hasProperty(PBoard);
+}
+
+QString boardOf(const QTextBlock &block)
+{
+    return block.blockFormat().stringProperty(PBoard);
+}
+
+QTextBlock boardHost(const QTextBlock &block)
+{
+    if (!block.isValid() || tableOf(block))
+        return QTextBlock();
+    const Kind k = kindOf(block);
+    if (k == Output) {
+        const QTextBlock head = cellHead(block);
+        return head.isValid() ? head : runFirst(block);
+    }
+    return k == Code || k == Raw ? runFirst(block) : block;
+}
+
+void setBoard(const QTextBlock &block, const QString &drawing)
+{
+    QTextBlockFormat f;
+    f.setProperty(PBoard, drawing);
+    QTextCursor(block).mergeBlockFormat(f);
+}
+
+void clearBoard(const QTextBlock &block)
+{
+    QTextBlockFormat f = block.blockFormat();
+    f.clearProperty(PBoard);
+    QTextCursor(block).setBlockFormat(f);
+}
+
 // ---- spacing --------------------------------------------------------------
 
 namespace {

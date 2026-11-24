@@ -18,6 +18,8 @@
 //
 //     $e^{i\pi} = -1$              math, inline or $$display$$
 //
+//     <!--storyboard k3:12,30,40,52-->     the storyboard frame of the line above it, and what is drawn there
+//
 //     <!--font: EB Garamond-->     the face the document is set in (last line; none for the default)
 //
 // A screenplay ends in <!--script--> and its paragraphs are read the way
@@ -117,6 +119,7 @@ private:
     Kind kind(const QTextBlock &b) const;
     QString lang(const QTextBlock &b) const;
     QString fileSrc(const QString &src);
+    static QString board(const QTextBlock &b, bool alone = false);
     QString atomText(const Atom &a, bool html) const;
     struct Escape { bool oneLine, cell, everything, tilde, dollar; };
     QString emitRuns(const Runs &runs, int mode, const Escape &esc) const;
@@ -151,6 +154,7 @@ private:
     void imageBlock(Runs runs);
     void fence(const QString &info, const QString &content);
     void html(const QString &content);
+    void board(const QString &drawing, bool alone);
     void table(const MdBlock &block);
     void blocks(const QVector<MdBlock> &blocks);
 
@@ -169,6 +173,11 @@ private:
 // The line that records a document's text face ("" for the default one, which needs none).
 QString faceComment(const QString &face);
 extern const char *const kScriptComment;        // ...and the one that says it is a script
+
+// The line that records a storyboard frame. It belongs to the line written
+// before it; `alone` says that line is empty (which Markdown has no way to
+// write), so the frame gets a line of its own when it is read.
+QString boardComment(const QString &drawing, bool alone = false);
 
 // Replace the document's content (and its text face) with Markdown's. Returns the front matter.
 QString loadMarkdown(QTextDocument *doc, const QString &text, AssetStore *store = nullptr, bool importImages = false);
