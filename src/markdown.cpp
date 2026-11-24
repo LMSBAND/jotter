@@ -1161,8 +1161,6 @@ QString MarkdownWriter::text()
         if (!chunk.isEmpty())
             chunks << chunk;
     };
-    // A cell's storyboard frame is written after all of the cell, not between the code and what it printed.
-    auto outputNext = [&](int j) { return j < n && !items[j].table && kind(items[j].block) == Output; };
 
     int i = 0;
     while (i < n) {
@@ -1173,6 +1171,7 @@ QString MarkdownWriter::text()
         }
         const QTextBlock b = items[i].block;
         const Kind k = kind(b);
+        const int before = chunks.size();
         if (k == Code) {
             const QString l = lang(b);
             QStringList lines;
@@ -1182,8 +1181,6 @@ QString MarkdownWriter::text()
                  }, &i))
                 lines << x.text();
             add(fence(l, lines));
-            if (!outputNext(i))
-                add(board(b));
         } else if (k == Output) {
             QStringList lines;
             bool err = false;
@@ -1214,13 +1211,11 @@ QString MarkdownWriter::text()
                     lines << t;
             }
             flush();
-            add(board(boardHost(b)));
         } else if (k == Raw) {
             QStringList lines;
             for (const QTextBlock &x : gather(i, [&](const QTextBlock &x) { return kind(x) == Raw; }, &i))
                 lines << x.text();
             add(lines.join('\n'));
-            add(board(b));
         } else if (k == Fold) {
             QTextCharFormat cf;
             if (objectFormat(b, ObjFold, &cf)) {
@@ -1236,12 +1231,9 @@ QString MarkdownWriter::text()
                     extra.append(r);
             add(inlineText(extra));
             ++i;
-            if (!outputNext(i))
-                add(board(b));
         } else if (k == Rule) {
             add(inlineText(runsOf(b)));
             add("---");
-            add(board(b));
             ++i;
         } else if (k == Heading) {
             const int level = b.blockFormat().headingLevel();
@@ -1251,7 +1243,6 @@ QString MarkdownWriter::text()
             const QString t = inlineText(runs, OneLine, level);
             if (!t.isEmpty())
                 add(QString(level, '#') + " " + t);
-            add(board(b, t.isEmpty()));
             ++i;
         } else if (k == Quote) {
             QStringList paras;
@@ -1267,12 +1258,20 @@ QString MarkdownWriter::text()
             add(list(items, i));
         } else {
             const Runs runs = runsOf(b);
-            const QString t = runs.size() == 1 && runs[0].atom.type == Atom::Math && runs[0].atom.display
-                ? "$$\n" + runs[0].atom.src.trimmed() + "\n$$" : inlineText(runs);
-            add(t);
-            add(board(b, t.isEmpty()));
+            if (runs.size() == 1 && runs[0].atom.type == Atom::Math && runs[0].atom.display)
+                add("$$\n" + runs[0].atom.src.trimmed() + "\n$$");
+            else
+                add(inlineText(runs));
             ++i;
         }
+        // The line's storyboard frame comes after it: a cell's after all of the
+        // cell, with what it printed. (The items of a list and the paragraphs of
+        // a quote have written theirs among their own lines.)
+        const bool cell = (k == Code || k == Fold) && i < n && !items[i].table && kind(items[i].block) == Output;
+        if (k == Output)
+            add(board(boardHost(b)));
+        else if (!cell && k != Quote && !(k == Para && b.textList()))
+            add(board(b, chunks.size() == before));
     }
     const QString face = faceComment(faceOf(m_doc));
     if (!face.isEmpty())

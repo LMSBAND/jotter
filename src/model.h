@@ -24,6 +24,7 @@ enum Prop {
     PErr,                                   // output block: this is an error/traceback
     PCell,                                  // code block: which cell a line belongs to, so that two cells
                                             // of the same language can sit next to each other
+    PBoard,                                 // block: this line has a storyboard frame; what is drawn in it (see Stroke)
     PSrc = QTextFormat::UserProperty + 10,  // figure: "asset:name", a path relative to the document, or a URL
     PWidth,                                 // figure: display width in logical px (0 = natural)
     PAlt,                                   // figure: alt text
@@ -32,7 +33,6 @@ enum Prop {
     PCode,                                  // fold object: the hidden cell's source
     PRaw,                                   // inline text written back to Markdown verbatim (unknown HTML)
     PFace = QTextFormat::UserProperty + 30, // the document (its root frame): the text face it is set in, by name
-    PBoard = QTextFormat::UserProperty + 40,// block: this line has a storyboard frame; what is drawn in it (see Stroke)
 };
 
 enum Kind { Para, Code, Output, Raw, Fold, Rule, Quote, Heading };

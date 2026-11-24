@@ -74,6 +74,8 @@ private:
     bool restoreFrom(const QString &file, const QString &path);
 
     Editor *m_editor = nullptr;
+    Storyboard *m_storyboard = nullptr;     // frames to doodle in, down the right side...
+    QDockWidget *m_board = nullptr;         // ...and the panel it is in
     QString m_path;
     QSettings m_settings;
     QTimer m_recoveryTimer, m_wordTimer;
@@ -87,8 +89,6 @@ private:
     QAction *m_bold = nullptr, *m_italic = nullptr, *m_underline = nullptr, *m_strike = nullptr, *m_code = nullptr,
             *m_bullets = nullptr, *m_numbers = nullptr, *m_checks = nullptr, *m_stop = nullptr, *m_dark = nullptr,
             *m_spell = nullptr, *m_hideAll = nullptr;
-    QDockWidget *m_board = nullptr;         // the storyboard, down the right side
-    Storyboard *m_storyboard = nullptr;
 };
 
 }  // namespace jot

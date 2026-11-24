@@ -121,6 +121,10 @@ Courier Prime and Comic Relief. The choice is saved in the document and goes
 into the PDF or HTML exported from it, on any machine. A new document starts in
 the face picked last.
 
+An existing `.md` opens as a document (File > Open, or `jotter file.md`). To pull
+one into the document you are in: File > Import, or drop the file on the page
+(dropped on an empty window, it opens instead).
+
 View > Storyboard opens a strip of frames down the right side, to sketch in
 beside the writing. A frame belongs to a line: put the cursor on the line and
 press Add Frame (or Ctrl+Alt+F), then doodle in it with the mouse. There are
@@ -132,10 +136,6 @@ frame small in its right margin, beside its line; a click there brings the
 frame up, and a click on the text above a frame goes to its line. A whole cell
 has one frame, and a table has none. The drawings are saved in the document;
 they are not in what is exported.
-
-An existing `.md` opens as a document (File > Open, or `jotter file.md`). To pull
-one into the document you are in: File > Import, or drop the file on the page
-(dropped on an empty window, it opens instead).
 
 ## The file
 
