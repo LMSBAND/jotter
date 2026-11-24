@@ -4,6 +4,7 @@
 #include "assets.h"
 #include "editor.h"
 #include "exporter.h"
+#include "history.h"
 #include "kernel.h"
 #include "mainwindow.h"
 #include "markdown.h"
@@ -2134,6 +2135,269 @@ static void test_storyboard()
     ed->document()->setModified(false);     // (nothing to ask about when the window closes)
 }
 
+// A file's name in a cell, or in what one printed: found, loaded as a cell, offered on a right click.
+static void test_file_cells()
+{
+    QTemporaryDir dir;
+    auto write = [&](const QString &name, const QByteArray &data) {
+        QFile f(dir.path() + "/" + name);
+        return f.open(QIODevice::WriteOnly) && f.write(data) == data.size();
+    };
+    QDir(dir.path()).mkdir("sub");
+    CHECK(write("plot.py", "x = 1\r\nprint(x)\n\n") && write("my notes.txt", "hello\n") && write("sub/q.sql", "select 1;\n")
+          && write("blob.bin", QByteArray("a\0b", 3)));
+    Typist t;
+    t.ed.loadMarkdown("Run plot.py here.\n\n```bash\npython plot.py 'my notes.txt' missing.py sub/q.sql --out=blob.bin sub .\n```\n\n"
+                      "```output\n  File \"plot.py\", line 2\nplot.py:2:5: error, see " + dir.path() + "/sub/q.sql.\n```\n",
+                      dir.path() + "/doc.md");
+    auto at = [&](int block, const QString &text, int inside = 1) {
+        const QTextBlock b = t.ed.document()->findBlockByNumber(block);
+        QTextCursor c(b);
+        c.setPosition(b.position() + b.text().indexOf(text) + inside);
+        return c;
+    };
+    const QString here = QDir::cleanPath(dir.path());
+    CHECK_EQ(t.ed.fileAt(at(0, "plot.py")), QString());                 // in the text: not a cell
+    CHECK_EQ(t.ed.fileAt(at(1, "plot.py")), here + "/plot.py");
+    CHECK_EQ(t.ed.fileAt(at(1, "plot.py", 0)), here + "/plot.py");      // at its first letter, and after its last
+    CHECK_EQ(t.ed.fileAt(at(1, "plot.py", 7)), here + "/plot.py");
+    CHECK_EQ(t.ed.fileAt(at(1, "notes.txt")), here + "/my notes.txt");  // in quotes, with a space in it
+    CHECK_EQ(t.ed.fileAt(at(1, "missing.py")), QString());
+    CHECK_EQ(t.ed.fileAt(at(1, "q.sql")), here + "/sub/q.sql");
+    CHECK_EQ(t.ed.fileAt(at(1, "blob.bin")), here + "/blob.bin");
+    CHECK_EQ(t.ed.fileAt(at(1, "sub .")), here + "/sub");               // a folder
+    CHECK_EQ(t.ed.fileAt(at(1, " .", 1)), QString());
+    CHECK_EQ(t.ed.fileAt(at(1, "python")), QString());
+    CHECK_EQ(t.ed.fileAt(at(2, "plot.py")), here + "/plot.py");         // in what was printed
+    CHECK_EQ(t.ed.fileAt(at(3, "plot.py:2")), here + "/plot.py");       // with the line a compiler names
+    CHECK_EQ(t.ed.fileAt(at(3, "q.sql.")), here + "/sub/q.sql");        // a full path, and the sentence's full stop
+    CHECK(Editor::isTextFile(here + "/plot.py") && !Editor::isTextFile(here + "/blob.bin") && !Editor::isTextFile(here + "/sub")
+          && !Editor::isTextFile(here + "/missing.py"));
+
+    // loaded: a cell of its own under the cell, in the file's language
+    const QString before = t.md();
+    t.ed.setTextCursor(at(1, "plot.py"));
+    t.ed.loadFileCell(here + "/plot.py");
+    QString want = before;
+    want.replace("q.sql.\n```\n", "q.sql.\n```\n\n```python\nx = 1\nprint(x)\n```\n");
+    CHECK_EQ(t.md(), want);
+    CHECK_EQ(t.ed.textCursor().block().text(), QString("x = 1"));
+    t.ed.undoStep();
+    CHECK_EQ(t.md(), before);
+    t.ed.setTextCursor(at(1, "plot.py"));
+    t.ed.loadFileCell(here + "/blob.bin");
+    CHECK_EQ(t.md(), before);
+    CHECK(t.tidy());
+
+    // the right click: both for a file of text, the folder alone for anything else, neither for a word
+    auto menuAt = [&](const QTextCursor &c, const QString &pick) {
+        QStringList offered;
+        const QPoint p = t.ed.cursorRect(c).center();
+        QTimer::singleShot(200, [&] {
+            auto *menu = qobject_cast<QMenu *>(QApplication::activePopupWidget());
+            if (!menu)
+                return;
+            QAction *chosen = nullptr;
+            for (QAction *a : menu->actions()) {
+                offered << a->text();
+                if (!pick.isEmpty() && a->text() == pick)
+                    chosen = a;
+            }
+            if (chosen)
+                chosen->trigger();
+            menu->close();
+        });
+        QContextMenuEvent event(QContextMenuEvent::Mouse, p, t.ed.viewport()->mapToGlobal(p));
+        QApplication::sendEvent(t.ed.viewport(), &event);
+        return offered;
+    };
+    QStringList offered = menuAt(at(1, "plot.py", 3), QString());
+    CHECK(offered.contains("Load plot.py in a Cell") && offered.contains("Open Containing Folder"));
+    offered = menuAt(at(1, "blob.bin", 3), QString());
+    CHECK(!offered.join('|').contains("in a Cell") && offered.contains("Open Containing Folder"));
+    offered = menuAt(at(1, "sub .", 1), QString());
+    CHECK(!offered.join('|').contains("in a Cell") && offered.contains("Open Folder"));
+    offered = menuAt(at(1, "python", 3), QString());
+    CHECK(!offered.isEmpty() && !offered.join('|').contains("Folder"));
+    menuAt(at(1, "q.sql", 2), "Load q.sql in a Cell");
+    CHECK(t.md().endsWith("```sql\nselect 1;\n```\n"));
+}
+
+// Every save is kept, beside the document; Undo and Redo go through the saves when nothing typed is left.
+static void test_history()
+{
+    QTemporaryDir dir;
+    auto write = [](const QString &path, const QByteArray &data) {
+        QFile f(path);
+        return f.open(QIODevice::WriteOnly) && f.write(data) == data.size();
+    };
+    auto read = [](const QString &path) {
+        QFile f(path);
+        return f.open(QIODevice::ReadOnly) ? f.readAll() : QByteArray("<unreadable>");
+    };
+
+    // the store itself: one save after another, each with the document and its pictures
+    {
+        const QString path = dir.path() + "/notes.md", pics = dir.path() + "/notes.assets";
+        QDir().mkpath(pics);
+        CHECK(write(pics + "/a.png", "AAA") && write(pics + "/b.png", "BBB"));
+        History h(path);
+        CHECK_EQ(QFileInfo(h.dir()).fileName(), QString(".notes.history"));
+        CHECK(h.head().isEmpty() && h.count() == 0 && !QFile::exists(h.dir()));     // nothing until the first save
+        const QString one = h.commit("first\n", {});
+        const QString two = h.commit("second\n", {pics + "/a.png"});
+        CHECK_EQ(h.commit("second\n", {pics + "/a.png"}), two);                      // saved again, nothing changed
+        const QString three = h.commit("third\n", {pics + "/a.png", pics + "/b.png"});
+        CHECK(one.size() == 40 && two.size() == 40 && three.size() == 40 && one != two && two != three);
+        CHECK_EQ(h.head(), three);
+        CHECK_EQ(h.count(), 3);
+        CHECK_EQ(h.parent(three), two);
+        CHECK_EQ(h.parent(one), QString());
+        CHECK_EQ(h.child(one), two);
+        CHECK_EQ(h.child(three), QString());
+        CHECK(h.number(one) == 1 && h.number(three) == 3 && h.number("nothing") == 0);
+        CHECK_EQ(QString::fromUtf8(h.text(two)), QString("second\n"));
+        CHECK(h.holds(two) && !h.holds("nothing"));
+        CHECK_EQ(h.find("second\n"), two);
+        CHECK_EQ(h.find("never\n"), QString());
+        CHECK(qAbs(h.when(three).secsTo(QDateTime::currentDateTime())) < 60);
+        const QString four = h.commit("first\n", {});
+        CHECK_EQ(h.find("first\n"), four);          // the newest that says so...
+        CHECK_EQ(h.find("first\n", one), one);      // ...unless it is known which
+        CHECK_EQ(h.parent(four), three);            // one line: an old text saved again comes after the newest
+        // a picture that has gone since is put back for the save that had it
+        QFile::remove(pics + "/a.png");
+        CHECK_EQ(h.restorePictures(two, pics).join(' '), QString("a.png"));
+        CHECK_EQ(QString::fromLatin1(read(pics + "/a.png")), QString("AAA"));
+        CHECK_EQ(h.restorePictures(two, pics).join(' '), QString());
+        // it is a git repository: what git expects is there, and another reader finds the same
+        CHECK(QFile::exists(h.dir() + "/HEAD") && QFile::exists(h.dir() + "/config") && QFile::exists(h.dir() + "/refs/heads/main"));
+        CHECK_EQ(QString::fromLatin1(read(h.dir() + "/.gitignore")), QString("*\n"));
+        CHECK_EQ(History(path).head(), four);
+        CHECK_EQ(History(path).count(), 4);
+        // (git's own name for a file that says "hello\n")
+        CHECK_EQ(History(dir.path() + "/x.md").commit("hello\n", {}).size(), 40);
+        CHECK(QFile::exists(dir.path() + "/.x.history/objects/ce/013625030ba8dba906f756967f9e9ca394464a"));
+    }
+
+    // in the window: saving keeps, and Undo goes on into the saves
+    const QString path = dir.path() + "/story.md";
+    MainWindow w;
+    w.resize(1100, 900);
+    w.show();
+    w.activateWindow();
+    CHECK(QTest::qWaitForWindowActive(&w));
+    w.open(path);
+    auto *ed = w.findChild<Editor *>();
+    ed->setFocus();
+    auto save = [&] { QTest::keyClick(ed, Qt::Key_S, Qt::ControlModifier); };
+    auto undo = [&] { QTest::keyClick(ed, Qt::Key_Z, Qt::ControlModifier); };
+    auto redo = [&] { QTest::keyClick(ed, Qt::Key_Z, Qt::ControlModifier | Qt::ShiftModifier); };
+    QTest::keyClicks(ed, "one");
+    save();
+    QTest::keyClicks(ed, " two");
+    save();
+    save();                                         // (nothing changed: not another save)
+    QTest::keyClicks(ed, " three");
+    save();
+    CHECK_EQ(History(path).count(), 3);
+    CHECK_EQ(QString::fromUtf8(read(path)), QString("one two three\n"));
+
+    // a new document, all of it undone: there is nothing before that
+    for (int i = 0; i < 20 && ed->document()->isUndoAvailable(); ++i)
+        undo();
+    CHECK_EQ(ed->toMarkdown(), QString());
+    undo();
+    CHECK_EQ(ed->toMarkdown(), QString());
+    CHECK_EQ(History(path).count(), 3);
+    for (int i = 0; i < 20 && ed->document()->isRedoAvailable(); ++i)
+        redo();
+    CHECK_EQ(ed->toMarkdown(), QString("one two three\n"));
+    CHECK(!w.isWindowModified());
+
+    // opened again there is nothing typed to undo: Undo is the save before, and the one before that
+    w.open(path);
+    CHECK(!ed->document()->isUndoAvailable());
+    undo();
+    CHECK_EQ(ed->toMarkdown(), QString("one two\n"));
+    CHECK(w.isWindowModified());                    // it is not what the file says
+    CHECK_EQ(QString::fromUtf8(read(path)), QString("one two three\n"));      // which nobody touched
+    undo();
+    CHECK_EQ(ed->toMarkdown(), QString("one\n"));
+    undo();
+    CHECK_EQ(ed->toMarkdown(), QString("one\n"));   // the first save
+    redo();
+    CHECK_EQ(ed->toMarkdown(), QString("one two\n"));
+    redo();
+    CHECK_EQ(ed->toMarkdown(), QString("one two three\n"));
+    CHECK(!w.isWindowModified());                   // back at what the file says
+    redo();
+    CHECK_EQ(ed->toMarkdown(), QString("one two three\n"));
+    CHECK_EQ(History(path).count(), 3);             // looking is not saving
+
+    // a key held down does not run on into the saves
+    {
+        QKeyEvent held(QEvent::KeyPress, Qt::Key_Z, Qt::ControlModifier, QString(), true);
+        QApplication::sendEvent(ed, &held);
+        CHECK_EQ(ed->toMarkdown(), QString("one two three\n"));
+    }
+
+    // go back, change it, save: that is the newest save, after the ones gone back over
+    undo();
+    undo();
+    CHECK_EQ(ed->toMarkdown(), QString("one\n"));
+    ed->moveCursor(QTextCursor::End);
+    QTest::keyClicks(ed, " again");
+    redo();                                         // (not over what was just typed)
+    CHECK_EQ(ed->toMarkdown(), QString("one again\n"));
+    save();
+    CHECK_EQ(History(path).count(), 4);
+    CHECK_EQ(QString::fromUtf8(read(path)), QString("one again\n"));
+    w.open(path);
+    undo();
+    CHECK_EQ(ed->toMarkdown(), QString("one two three\n"));
+    undo();
+    CHECK_EQ(ed->toMarkdown(), QString("one two\n"));
+
+    // typed on an old save and undone, then further back: what was typed is kept too, as the newest
+    ed->moveCursor(QTextCursor::End);
+    QTest::keyClicks(ed, "!");
+    undo();
+    CHECK_EQ(ed->toMarkdown(), QString("one two\n"));
+    undo();
+    CHECK_EQ(ed->toMarkdown(), QString("one\n"));
+    CHECK_EQ(History(path).count(), 5);
+    CHECK_EQ(QString::fromUtf8(History(path).text(History(path).head())), QString("one two!\n"));
+    CHECK_EQ(QString::fromUtf8(read(path)), QString("one again\n"));          // the file is only ever what was saved
+
+    // changed by something else since: that is kept as well, when Jotter next saves or goes back
+    CHECK(write(path, "from elsewhere\n"));
+    w.open(path);
+    CHECK_EQ(History(path).count(), 5);             // opening writes nothing
+    undo();
+    CHECK_EQ(ed->toMarkdown(), QString("one two!\n"));
+    CHECK_EQ(History(path).count(), 6);
+    redo();
+    CHECK_EQ(ed->toMarkdown(), QString("from elsewhere\n"));
+    CHECK(!w.isWindowModified());
+
+    // a document that was there before its saves were kept: the first save keeps how it was, too
+    const QString old = dir.path() + "/old.md";
+    CHECK(write(old, "written long ago\n"));
+    w.open(old);
+    undo();
+    CHECK_EQ(ed->toMarkdown(), QString("written long ago\n"));
+    CHECK(!QFile::exists(History(old).dir()));      // nothing was saved here by Jotter, so nothing is kept yet
+    ed->moveCursor(QTextCursor::End);
+    QTest::keyClicks(ed, " and now");
+    save();
+    CHECK_EQ(History(old).count(), 2);
+    w.open(old);
+    undo();
+    CHECK_EQ(ed->toMarkdown(), QString("written long ago\n"));
+    ed->document()->setModified(false);             // (nothing to ask about when the window closes)
+}
+
 int main(int argc, char **argv)
 {
     QTemporaryDir home;         // tests never touch the real settings, caches or recovery files
@@ -2179,6 +2443,8 @@ int main(int argc, char **argv)
         {"window", test_window},
         {"dialogs", test_dialogs},
         {"storyboard", test_storyboard},
+        {"history", test_history},
+        {"file_cells", test_file_cells},
     };
     int ran = 0;
     for (const auto &t : tests) {

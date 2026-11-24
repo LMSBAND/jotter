@@ -32,6 +32,7 @@ public:
     void loadMarkdown(const QString &text, const QString &path = QString(), bool importImages = false);
     QString toMarkdown(bool absolute = false, QSet<QString> *assets = nullptr) const;
     bool save(const QString &path, QString *error = nullptr);
+    void showVersion(const QString &text, bool modified);  // the same document as it was at another save (see history.h)
     QString selectionMarkdown(const QTextCursor &cursor) const;
     AssetStore &store() { return m_store; }
     const AssetStore &store() const { return m_store; }
@@ -56,6 +57,9 @@ public:
     QString cellState(const QTextBlock &block) const;   // "", "queued" or "running"
     void deleteCell(const QTextBlock &head);            // the cell and what it printed (the x on its tag)
     QStringList completions();                          // what a code cell offers to finish, where the cursor is
+    QString fileAt(const QTextCursor &at) const;        // the file or folder that a cell (or what it printed) names there: its path, or ""
+    static bool isTextFile(const QString &path);        // a file, of text, not too long to be a cell
+    void loadFileCell(const QString &path);             // a file's text as a new cell, below the one the cursor is in
 
     // ---- the storyboard: frames to doodle in, each belonging to a line ------
     struct Board { QTextBlock block; QString drawing; };
@@ -113,6 +117,7 @@ signals:
     void faceChanged();                     // the document's text face is another one now, or it became a script (or no longer is)
     void zoomRequested(int steps);          // Ctrl+wheel
     void filesDropped(const QStringList &paths);    // Markdown/text files dropped or pasted onto the page
+    void pastEdits(bool undo);              // Undo (or Redo) was asked for and there is nothing typed left to undo (redo)
     void themeChanged();                    // colours, fonts or zoom
     void boardsChanged();                   // a storyboard frame came, went, moved or was drawn in
     void boardPicked(int index);            // a frame's small picture in the page's margin was clicked
@@ -138,7 +143,7 @@ private:
     void onContentsChanged();
     void dirtyBlocks(QTextBlock *first, QTextBlock *last) const;
     void normalizeRange(const QTextBlock &first, const QTextBlock &last, bool join);
-    void replay(bool undo);
+    void replay(bool undo, bool held = false);
     bool followFace();
 
     // the storyboard

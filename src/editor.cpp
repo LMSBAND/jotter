@@ -367,6 +367,23 @@ bool Editor::save(const QString &path, QString *error)
     return true;
 }
 
+// The page set to what this same document was at another of its saves. It is
+// still the document of the file on disk, which has not changed: what that
+// file refers to stays as it was, and so does the place on the page.
+void Editor::showVersion(const QString &text, bool modified)
+{
+    const QSet<QString> onDisk = m_store.savedRefs;
+    const int scroll = verticalScrollBar()->value(), position = textCursor().position();
+    loadMarkdown(text, m_store.docPath);
+    m_store.savedRefs = onDisk;
+    document()->setModified(modified);
+    QTextCursor c(document());
+    c.setPosition(qMin(position, document()->characterCount() - 1));
+    setTextCursor(c);
+    document()->documentLayout()->documentSize();       // (laid out to the end, so that the bar can go where it was)
+    verticalScrollBar()->setValue(scroll);
+}
+
 // The selection as Markdown, with pictures as absolute paths so it can be
 // pasted into another document.
 QString Editor::selectionMarkdown(const QTextCursor &cursor) const
@@ -470,9 +487,16 @@ void Editor::normalizeRange(const QTextBlock &first, const QTextBlock &last, boo
 // Qt may keep our spacing fix-up as a separate undo step from the edit that
 // caused it. One press of Undo should never stop half-way, so keep stepping
 // until the document is consistent again.
-void Editor::replay(bool undo)
+void Editor::replay(bool undo, bool held)
 {
     QTextDocument *doc = document();
+    if (undo ? !doc->isUndoAvailable() : !doc->isRedoAvailable()) {
+        // Further back (or on) than this there are only the document's saves. A key
+        // that is being held down stops here: going on takes pressing it again.
+        if (!held)
+            emit pastEdits(undo);
+        return;
+    }
     const QTextCursor before = textCursor();
     bool refaced = false;
     m_replaying = true;
@@ -760,11 +784,11 @@ void Editor::keyPressEvent(QKeyEvent *e)
 void Editor::typeKey(QKeyEvent *e)
 {
     if (e->matches(QKeySequence::Undo)) {
-        undoStep();
+        replay(true, e->isAutoRepeat());
         return;
     }
     if (e->matches(QKeySequence::Redo)) {
-        redoStep();
+        replay(false, e->isAutoRepeat());
         return;
     }
     const int key = e->key();
@@ -1725,6 +1749,23 @@ void Editor::contextMenuEvent(QContextMenuEvent *e)
             else
                 table->addAction(op.first, this, [this, op] { tableOp(op.second); });
         }
+    }
+    const QString file = fileAt(at);        // a file's name in a cell, or in what one printed
+    if (!file.isEmpty()) {
+        const QFileInfo fi(file);
+        const bool folder = fi.isDir();
+        QString name = fi.fileName();
+        if (name.size() > 40)
+            name = name.left(18) + QString::fromUtf8("\xE2\x80\xA6") + name.right(18);
+        menu.addSeparator();
+        if (isTextFile(file))
+            menu.addAction(tr("Load %1 in a Cell").arg(name.replace('&', "&&")), this, [this, file, at] {
+                setTextCursor(at);
+                loadFileCell(file);
+            });
+        menu.addAction(folder ? tr("Open Folder") : tr("Open Containing Folder"), this, [fi, folder] {
+            QDesktopServices::openUrl(QUrl::fromLocalFile(folder ? fi.absoluteFilePath() : fi.absolutePath()));
+        });
     }
     menu.exec(e->globalPos());
 }

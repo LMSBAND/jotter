@@ -29,6 +29,7 @@ add_library(jottercore STATIC
   src/editor.cpp
   src/editor_commands.cpp
   src/storyboard.cpp
+  src/history.cpp
   src/exporter.cpp
   src/mainwindow.cpp
   data/resources.qrc

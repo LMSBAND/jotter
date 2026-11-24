@@ -2,6 +2,7 @@
 
 #include "editor.h"
 #include "exporter.h"
+#include "history.h"
 #include "markdown.h"
 #include "render.h"
 #include "storyboard.h"
@@ -215,6 +216,7 @@ MainWindow::MainWindow()
     connect(m_editor, &Editor::status, this, [this](const QString &m) { statusBar()->showMessage(m, 6000); });
     connect(m_editor, &Editor::zoomRequested, this, &MainWindow::zoomBy);
     connect(m_editor, &Editor::filesDropped, this, &MainWindow::dropped);
+    connect(m_editor, &Editor::pastEdits, this, &MainWindow::throughSaves);
     connect(m_editor->document(), &QTextDocument::contentsChanged, &m_wordTimer, QOverload<>::of(&QTimer::start));
     connect(m_editor, &QTextEdit::selectionChanged, &m_wordTimer, QOverload<>::of(&QTimer::start));
     m_wordTimer.setSingleShot(true);
@@ -729,6 +731,7 @@ void MainWindow::open(const QString &path)
         text = QString::fromUtf8(file.readAll());
     }
     m_path = QFileInfo(path).absoluteFilePath();
+    m_shown.clear();
     m_editor->loadMarkdown(text, m_path);
     if (file.exists())
         addRecent(m_path);
@@ -745,6 +748,9 @@ void MainWindow::open(const QString &path)
             restoreFrom(recovery, m_path);
         QFile::remove(recovery);
     }
+    m_found = QByteArray();
+    if (file.exists())
+        page(&m_found, &m_foundPictures);       // as it came: to be kept before the first save of this sitting (see save)
 }
 
 void MainWindow::openDialog()
@@ -795,10 +801,96 @@ bool MainWindow::save()
         QMessageBox::warning(this, tr("Jotter"), tr("Could not save %1:\n%2").arg(m_path, error));
         return false;
     }
+    keepFound();
+    keep();
     clearRecovery();
     addRecent(m_path);
     statusBar()->showMessage(tr("Saved"), 2500);
     return true;
+}
+
+// The page as it is: its text, and the picture files that text refers to.
+void MainWindow::page(QByteArray *text, QStringList *pictures) const
+{
+    QSet<QString> names;
+    *text = m_editor->toMarkdown(false, &names).toUtf8();
+    pictures->clear();
+    for (const QString &name : qAsConst(names))
+        *pictures << m_editor->store().path(name);
+}
+
+// Every save is kept (history.h). This is the page as it is, as one more.
+QString MainWindow::keep()
+{
+    QByteArray text;
+    QStringList pictures;
+    page(&text, &pictures);
+    return History(m_path).commit(text, pictures);
+}
+
+// The document as it was when it was opened, if that is not one of its saves:
+// it was written by something else, or before saves were kept. It goes in
+// ahead of what this sitting saves, so that going back arrives at it.
+void MainWindow::keepFound()
+{
+    if (m_found.isNull())
+        return;
+    History history(m_path);
+    if (history.find(m_found).isEmpty())
+        history.commit(m_found, m_foundPictures);
+    m_found = QByteArray();
+    m_foundPictures.clear();
+}
+
+// Undo, with nothing typed left to undo, goes back through the document's
+// saves; Redo comes forward through them again. Nothing is lost by it: what
+// is on the page and is not a save yet becomes one first, and the saves stay in
+// one line - saving an old one puts it after the newest.
+void MainWindow::throughSaves(bool back)
+{
+    QTextDocument *doc = m_editor->document();
+    if (m_path.isEmpty() || doc->isUndoAvailable())
+        return;
+    History history(m_path);
+    if (history.head().isEmpty())
+        return;             // never saved by a Jotter that keeps them
+    // Which save is this? (Here, with nothing to undo, the page is as it was opened or last set.)
+    QString at = history.find(m_editor->toMarkdown().toUtf8(), m_shown), to;
+    if (back) {
+        if (at.isEmpty()) {         // none of them
+            keepFound();
+            at = history.find(m_editor->toMarkdown().toUtf8());
+            if (at.isEmpty() && doc->isEmpty())
+                return;             // a new document, before anything was written in it
+            if (at.isEmpty())
+                at = keep();
+        }
+        to = history.parent(at);
+        if (to.isEmpty() || !history.holds(to)) {
+            statusBar()->showMessage(tr("This is the first save of this document."), 4000);
+            return;
+        }
+        if (doc->isRedoAvailable()) {       // typed, and undone: kept as well, as the newest
+            while (doc->isRedoAvailable())
+                m_editor->redoStep();
+            keep();
+        }
+    } else {
+        to = history.child(at);
+        if (at.isEmpty() || to.isEmpty() || !history.holds(to))
+            return;
+    }
+    for (const QString &name : history.restorePictures(to, m_editor->store().dir()))
+        m_editor->store().noteCreated(name);
+    const QByteArray text = history.text(to);
+    QFile file(m_path);
+    const bool same = file.open(QIODevice::ReadOnly) && file.readAll() == text;
+    m_editor->showVersion(QString::fromUtf8(text), !same);
+    m_shown = to;
+    updateWords();
+    statusBar()->showMessage(tr("As saved %1 (save %2 of %3)")
+                                 .arg(QLocale().toString(history.when(to), QLocale::ShortFormat))
+                                 .arg(history.number(to)).arg(history.count()), 8000);
 }
 
 bool MainWindow::saveAs()
@@ -812,6 +904,8 @@ bool MainWindow::saveAs()
     clearRecovery();        // it is filed under the old name
     m_settings.setValue("dir", QFileInfo(path).absolutePath());
     m_path = QFileInfo(path).absoluteFilePath();
+    m_shown.clear();        // another document now, with saves of its own
+    m_found = QByteArray();
     updateTitle();
     return save();
 }

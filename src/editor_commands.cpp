@@ -11,6 +11,8 @@
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QDir>
+#include <QFileInfo>
+#include <QHash>
 #include <QInputDialog>
 #include <QLabel>
 #include <QMenu>
@@ -454,6 +456,93 @@ void Editor::insertCell(const QString &code, const QString &lang, bool run)
     setFocus();
     if (run)
         runCell(false);
+}
+
+// ---- files that cells name ----------------------------------------------------
+
+// Where `at` is, in a cell or in what a cell printed: the file or folder named
+// there, if there is one. A name means what it means to the cell, which runs
+// in the folder the document is in.
+QString Editor::fileAt(const QTextCursor &at) const
+{
+    const QTextBlock block = at.block();
+    const Kind k = kindOf(block);
+    if ((k != Code && k != Output) || tableOf(block))
+        return QString();
+    const QString line = block.text();
+    const int col = qBound(0, at.positionInBlock(), int(line.size()));
+    QStringList names;
+    // in quotes: all of what is quoted (a name can have spaces in it)
+    for (const QChar quote : {QChar('"'), QChar('\'')}) {
+        const int open = col > 0 ? line.lastIndexOf(quote, col - 1) : -1, close = line.indexOf(quote, col);
+        if (open >= 0 && close > open && line.left(open + 1).count(quote) % 2 == 1)
+            names << line.mid(open + 1, close - open - 1);
+    }
+    // otherwise what stands there between spaces and brackets...
+    static const QString stops = QStringLiteral(" \t\"'`()[]{}<>,;=|*?");
+    int from = col, to = col;
+    while (from > 0 && !stops.contains(line[from - 1]))
+        --from;
+    while (to < line.size() && !stops.contains(line[to]))
+        ++to;
+    QString word = line.mid(from, to - from);
+    names << word;
+    // ...without the line a compiler names after it (plot.py:12:3:), or the full stop of a sentence
+    static const QRegularExpression where(QStringLiteral(R"(^(.+?)(?::\d+)+:?$)"));
+    const auto m = where.match(word);
+    if (m.hasMatch())
+        names << m.captured(1);
+    while (!word.isEmpty() && QStringLiteral(".,:!").contains(word.back())) {
+        word.chop(1);
+        names << word;
+    }
+    const QDir base(m_store.docPath.isEmpty() ? QDir::homePath() : m_store.docDir());
+    for (QString name : qAsConst(names)) {
+        if (name.startsWith("~/"))
+            name = QDir::homePath() + name.mid(1);
+        if (name.size() > 1024 || QString(name).remove('.').remove('/').remove('\\').isEmpty())
+            continue;           // (nothing, or "." and "..": a folder, but nobody meant it)
+        const QFileInfo fi(base, name);     // (a full path stays what it is)
+        if (fi.exists())
+            return QDir::cleanPath(fi.absoluteFilePath());
+    }
+    return QString();
+}
+
+bool Editor::isTextFile(const QString &path)
+{
+    const QFileInfo fi(path);
+    QFile f(path);
+    if (!fi.isFile() || fi.size() > 2 * 1024 * 1024 || !f.open(QIODevice::ReadOnly))
+        return false;
+    return !f.read(8192).contains('\0');
+}
+
+// A file's text as a cell of its own, below the cell the cursor is in: to read, to change, to run.
+void Editor::loadFileCell(const QString &path)
+{
+    static const QHash<QString, QString> languages = {
+        {"py", "python"}, {"pyw", "python"}, {"sh", "bash"}, {"js", "javascript"}, {"mjs", "javascript"}, {"cjs", "javascript"},
+        {"rb", "ruby"}, {"pl", "perl"}, {"h", "c"}, {"cc", "cpp"}, {"cxx", "cpp"}, {"hpp", "cpp"}, {"hh", "cpp"},
+        {"rs", "rust"}, {"gv", "dot"}, {"gp", "gnuplot"}, {"mmd", "mermaid"}, {"ps1", "powershell"}, {"bat", "batch"},
+        {"cmd", "batch"}, {"md", "markdown"}, {"yml", "yaml"}, {"htm", "html"}, {"txt", "text"}, {"", "text"}};
+    QFile f(path);
+    if (!isTextFile(path) || !f.open(QIODevice::ReadOnly)) {
+        emit status(tr("%1 is not a file of text that fits in a cell.").arg(QFileInfo(path).fileName()));
+        return;
+    }
+    QString text = QString::fromUtf8(f.readAll());
+    text.replace("\r\n", "\n");
+    while (text.endsWith('\n'))
+        text.chop(1);
+    const QString suffix = QFileInfo(path).suffix().toLower();
+    insertCell(text, languages.value(suffix, suffix));
+    const QTextBlock head = cellHead(textCursor().block());
+    if (head.isValid()) {       // a long file: its top is what to look at
+        setTextCursor(QTextCursor(head));
+        ensureCursorVisible();
+    }
+    emit status(tr("Loaded %1").arg(QFileInfo(path).fileName()));
 }
 
 void Editor::insertImageFile(const QString &path)

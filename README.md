@@ -91,6 +91,19 @@ tables say, and names its code uses. Tab takes the first offer, the arrows and
 Enter pick another, Esc puts the list away. Nothing comes from outside the
 document.
 
+A right click on a file's name in a cell, or in what a cell printed, offers to
+load that file in a cell of its own (below, in the file's language) and to open
+the folder it is in. Names mean what they mean to the cell: they start from the
+folder the document is in.
+
+Every save is kept. With nothing typed left to undo, Ctrl+Z goes back to the
+save before, and on to the one before that; Redo comes forward again.
+So a document opened today can be taken back to how it was saved last week. The
+file itself changes only when you save: save an old version and it becomes the
+newest save, after the ones gone back over, and Save As makes it a document of
+its own. The saves are in a hidden folder beside the document
+(`.notes.history`), with the pictures each of them had.
+
 A `sql` cell runs in that same session, on SQLite. The rows a query gives back
 are printed under the cell and are `_` in the next Python cell (`_["score"]` is
 one column, `_.columns` the names), and `:name` in a query is the Python
@@ -154,6 +167,8 @@ they are not in what is exported.
 ## The file
 
 `notes.md` is ordinary Markdown; pictures live beside it in `notes.assets/`.
+Its saves are in `.notes.history/`, which is a git repository with a commit for
+each (`git --git-dir=.notes.history log`); Jotter needs no git to write or read it.
 
 ````
 ```python                 a cell
@@ -207,6 +222,7 @@ Opening a document never runs anything; outputs are stored in the file.
 | `src/editor_commands.cpp` | what menus and shortcuts do; running cells |
 | `src/render.*` | theme, syntax colours (KSyntaxHighlighting), spelling (hunspell) |
 | `src/objects.*` | figures, formulas and hidden cells inside the text |
+| `src/history.*` | the saves of a document, kept beside it as a git repository |
 | `src/storyboard.*` | the storyboard panel: frames to draw in, the pens |
 | `src/kernel.*`, `data/kernel_worker.py` | running cells; the Python session |
 | `src/mathtex.*`, `data/mathtext_worker.py` | formulas to images: LaTeX, or matplotlib where there is none |

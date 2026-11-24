@@ -48,6 +48,10 @@ private:
     bool pristine() const;
     bool save();
     bool saveAs();
+    void page(QByteArray *text, QStringList *pictures) const;
+    QString keep();                     // the page as it is now, into the document's history of saves
+    void keepFound();
+    void throughSaves(bool back);       // Undo and Redo, when they run out of what was typed
     bool maybeSave();
     void exportHtml();
     void exportPdf();
@@ -82,6 +86,9 @@ private:
     Storyboard *m_storyboard = nullptr;     // frames to doodle in, down the right side...
     QDockWidget *m_board = nullptr;         // ...and the panel it is in
     QString m_path;
+    QString m_shown;                    // the save the page was last set to, going through them
+    QByteArray m_found;                 // the document as it was opened, until it is known to be among its saves
+    QStringList m_foundPictures;
     QSettings m_settings;
     QTimer m_recoveryTimer, m_wordTimer;
     QWidget *m_findBar = nullptr;
