@@ -458,6 +458,16 @@ QTextBlock boardHost(const QTextBlock &block)
         const QTextBlock head = cellHead(block);
         return head.isValid() ? head : runFirst(block);
     }
+    if (k == Paren || k == Dialogue) {      // a speech of a script has one frame, on its first line: who speaks
+        auto spoken = [](const QTextBlock &b) {
+            return b.isValid() && !tableOf(b) && (kindOf(b) == Paren || kindOf(b) == Dialogue);
+        };
+        QTextBlock first = block;
+        while (spoken(first.previous()))
+            first = first.previous();
+        const QTextBlock who = first.previous();
+        return who.isValid() && !tableOf(who) && kindOf(who) == Character ? who : first;
+    }
     return k == Code || k == Raw ? runFirst(block) : block;
 }
 

@@ -148,7 +148,7 @@ around it changes, travels with the line when that is cut and pasted, and goes
 when the line is deleted or the frame's x is clicked. The page shows every
 frame small in its right margin, beside its line; a click there brings the
 frame up, and a click on the text above a frame goes to its line. A whole cell
-has one frame, and a table has none. The drawings are saved in the document;
+has one frame, so does a speech in a script, and a table has none. The drawings are saved in the document;
 they are not in what is exported.
 
 ## The file

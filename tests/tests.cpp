@@ -1948,6 +1948,38 @@ static void test_storyboard()
     CHECK_EQ(c2.ed.boards().size(), 1);
     CHECK(c2.tidy());
 
+    // in a script a speech has one frame, on who speaks, whichever of its lines the cursor is on
+    {
+        const QString script = "INT. KITCHEN - NIGHT\n\n<!--storyboard k3:1,1-->\n\nRain on the window.\n\n"
+                               "MARA\n(not looking up)\nYou're late.\n\n<!--storyboard r3:2,2-->\n\n"
+                               "BRYAN\nTraffic.\n\nCUT TO:\n\n<!--storyboard b3:3,3-->\n\n<!--script-->\n";
+        Typist s;
+        s.ed.loadMarkdown(script);
+        CHECK_EQ(s.md(), script);
+        CHECK_EQ(s.ed.boards().size(), 3);
+        CHECK_EQ(s.ed.boards().value(1).block.text(), QString("MARA"));
+        CHECK(kindOf(s.ed.boards().value(2).block) == Transition);
+        s.ed.setTextCursor(QTextCursor(s.ed.document()->findBlockByNumber(4)));     // "You're late."
+        CHECK_EQ(s.ed.boardAtCursor(), 1);
+        s.ed.setTextCursor(QTextCursor(s.ed.document()->findBlockByNumber(6)));     // "Traffic."
+        CHECK_EQ(s.ed.boardAtCursor(), -1);
+        CHECK_EQ(s.ed.addBoard(), 2);
+        CHECK_EQ(s.ed.boards().value(2).block.text(), QString("BRYAN"));
+        s.ed.drawBoard(2, "g3:4,4");
+        QString framed = script;
+        framed.replace("BRYAN\nTraffic.\n\n", "BRYAN\nTraffic.\n\n<!--storyboard g3:4,4-->\n\n");
+        CHECK_EQ(s.md(), framed);
+        s.key(Qt::Key_End);
+        s.type("\nHe shrugs.");
+        CHECK_EQ(s.ed.boards().size(), 4);
+        CHECK_EQ(s.ed.boards().value(2).block.text(), QString("BRYAN"));
+        Typist again;
+        again.ed.loadMarkdown(s.md());
+        CHECK_EQ(again.md(), s.md());
+        CHECK_EQ(again.ed.boards().size(), 4);
+        CHECK(s.tidy());
+    }
+
     // a cell has one frame, whichever of its lines the cursor is on, shown or hidden
     Typist k;
     k.ed.loadMarkdown("```python\na = 1\nb = 2\n```\n\n```output\n3\n```\n\n| h |\n| --- |\n| c |\n");

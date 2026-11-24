@@ -125,7 +125,8 @@ QString drawingText(const Drawing &drawing);
 bool hasBoard(const QTextBlock &block);
 QString boardOf(const QTextBlock &block);
 // The block that holds the frame for the line `block` is part of: the line
-// itself, or the first line of the cell (or run) it is in. None in a table.
+// itself, or the first line of the cell (or run, or speech of a script) it is
+// in. None in a table.
 QTextBlock boardHost(const QTextBlock &block);
 void setBoard(const QTextBlock &block, const QString &drawing);
 void clearBoard(const QTextBlock &block);
